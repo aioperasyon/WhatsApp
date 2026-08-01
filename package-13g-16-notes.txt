@@ -1,0 +1,20 @@
+AI Operasyon — Paket 13G-16
+Queue → Campaign Repository Entegrasyonu
+
+Güncellenen dosya:
+- src/main/services/campaign-queue.service.ts
+
+Kaldırılan queue sorumlulukları:
+- CampaignRow interface
+- parseValues
+- mapCampaign
+- Kampanya detay SQL sorgusu
+
+Yeni davranış:
+- Queue servisi kampanya okumak için campaign.repository.ts içindeki
+  getCampaignById fonksiyonunu kullanır.
+- Queue içinde yalnızca bulunamayan kampanya için hata üreten ince
+  readCampaign wrapper'ı kalır.
+
+Önerilen commit mesajı:
+refactor(campaign): use campaign repository in queue

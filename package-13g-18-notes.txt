@@ -1,0 +1,18 @@
+AI Operasyon — Paket 13G-18
+Campaign Runtime Wait Service
+
+Yeni dosya:
+- src/main/services/campaign/campaign-runtime-wait.service.ts
+
+Queue servisinden taşınanlar:
+- waitInterruptibly
+- wakeRuntimeWait
+- Pause/cancel sırasında beklemeyi kesme
+- wakeWait referans temizliği
+
+Bu paket 13G-16 ve 13G-17 uygulanmış yerel kaynak üzerine kurulmalıdır.
+13G-18 başarılı olursa 13G-16, 13G-17 ve 13G-18 değişikliklerini
+birlikte repoya yükleyebilirsin.
+
+Önerilen commit mesajı:
+refactor(campaign): extract runtime wait service

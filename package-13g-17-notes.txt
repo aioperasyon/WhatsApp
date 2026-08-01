@@ -1,0 +1,17 @@
+AI Operasyon — Paket 13G-17
+Campaign Timing Service
+
+Yeni dosya:
+- src/main/services/campaign/campaign-timing.service.ts
+
+Queue servisinden taşınanlar:
+- Çalışma saati parse ve doğrulama
+- Geceye taşan çalışma penceresi hesabı
+- Sonraki yerel güne kalan süre
+- Rastgele kampanya gecikmesi üretimi
+
+Bu paket 13G-16 uygulanmış yerel kaynak üzerine kurulmalıdır.
+13G-16 ve 13G-17 başarılı olduktan sonra ikisini birlikte repoya yükleyebilirsin.
+
+Önerilen commit mesajı:
+refactor(campaign): extract campaign timing service

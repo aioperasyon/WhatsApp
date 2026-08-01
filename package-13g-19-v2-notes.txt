@@ -1,0 +1,4 @@
+AI Operasyon — Paket 13G-19 V2
+
+Önceki 13G-19 paketindeki CJS dize kaçış hatasını düzeltir.
+Önceki paket SyntaxError nedeniyle kaynak dosyalarda değişiklik yapmadı.
