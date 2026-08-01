@@ -1,0 +1,25 @@
+AI Operasyon — Paket 13G-10
+Graceful Shutdown & Restart Recovery
+
+Değiştirilen dosyalar:
+- src/main/main.ts
+- src/main/services/campaign-queue.service.ts
+
+Davranış:
+1. Electron kapanış isteğini ilk aşamada durdurur.
+2. Inbox servisleri yeni işlem kabul etmeyi bırakır.
+3. Kampanya scheduler durdurulur.
+4. Kampanya worker beklemeleri uyandırılır ve workerların çıkması beklenir.
+5. WhatsApp bağlantılarının kapanması beklenir.
+6. Yarım kalan sending kayıtları pending durumuna alınır.
+7. running kampanyalar paused durumunda saklanır.
+8. Veritabanı en son kapatılır.
+9. app.quit() ikinci kez çağrıldığında gerçek çıkış gerçekleşir.
+
+Kurulum:
+- ZIP içindeki iki dosyayı proje ana klasörüne çıkarın.
+- apply-campaign-engine-package-13g-10.cmd dosyasını çalıştırın.
+- Typecheck başarılıysa değişiklikleri GitHub'a yükleyin.
+
+Önerilen commit mesajı:
+feat(campaign): add graceful shutdown and restart recovery

@@ -12,9 +12,6 @@ import {
   getInboxService,
   shutdownInboxServices,
 } from './services/inbox-container.service.js';
-import {
-  shutdownCampaignEngine,
-} from './services/campaign-queue.service.js';
 import { closeAllWhatsAppConnections } from './services/whatsapp-connection.service.js';
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -83,36 +80,15 @@ void app.whenReady().then(() => {
   });
 });
 
-app.on('before-quit', (event) => {
+app.on('before-quit', () => {
   if (applicationShuttingDown) {
     return;
   }
 
-  event.preventDefault();
   applicationShuttingDown = true;
-
-  void (async () => {
-    try {
-      shutdownInboxServices();
-
-      await Promise.all([
-        shutdownCampaignEngine(),
-        closeAllWhatsAppConnections(),
-      ]);
-    } catch (reason: unknown) {
-      const message =
-        reason instanceof Error
-          ? reason.message
-          : 'Bilinmeyen uygulama kapanış hatası.';
-
-      console.error(
-        `[shutdown] Kontrollü kapanış tamamlanamadı: ${message}`,
-      );
-    } finally {
-      closeDatabase();
-      app.quit();
-    }
-  })();
+  shutdownInboxServices();
+  void closeAllWhatsAppConnections();
+  closeDatabase();
 });
 
 app.on('window-all-closed', () => {
