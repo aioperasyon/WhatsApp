@@ -1,0 +1,12 @@
+AI Operasyon — Paket 13G-11
+Kampanya Şemasını Merkezi Migration Sistemine Taşıma
+
+Değiştirilen dosyalar:
+- src/main/ipc/register-campaign-ipc.ts
+- src/main/database/migrations/run-migrations.ts
+
+Yeni dosya:
+- src/main/database/schema/campaign-schema.ts
+
+Önerilen commit mesajı:
+refactor(database): move campaign schema into migrations
