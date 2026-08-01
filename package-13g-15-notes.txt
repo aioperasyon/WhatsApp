@@ -1,0 +1,18 @@
+AI Operasyon — Paket 13G-15
+Recipient Lifecycle Repository
+
+Yeni dosya:
+- src/main/repositories/campaign-recipient-lifecycle.repository.ts
+
+Queue servisinden taşınanlar:
+- Pending alıcı seçme
+- Atomik recipient claim
+- Pending durumuna geri alma
+- Sent olarak işaretleme
+- Failed olarak işaretleme
+- Bekleyen alıcı sayımı
+
+13G-15 başarılı olduğunda repoya yükleyebilirsin.
+
+Önerilen commit mesajı:
+refactor(campaign): extract recipient lifecycle repository

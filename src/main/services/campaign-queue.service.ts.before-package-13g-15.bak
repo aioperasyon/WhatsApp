@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   Campaign,
   CampaignActionResult,
+  CampaignRecipientStatus,
   CampaignStatus,
 } from '../../../shared/interfaces/campaign.js';
 import { getDatabase } from '../database/database.js';
@@ -10,14 +11,6 @@ import {
   refreshCampaignRecipientCounts,
   seedCampaignRecipients,
 } from '../repositories/campaign-recipient-queue.repository.js';
-import {
-  claimCampaignRecipient,
-  countPendingCampaignRecipients,
-  findNextPendingCampaignRecipient,
-  markCampaignRecipientFailed,
-  markCampaignRecipientPending,
-  markCampaignRecipientSent,
-} from '../repositories/campaign-recipient-lifecycle.repository.js';
 import { sendCampaignMessage } from './whatsapp-connection.service.js';
 export { listCampaignRecipients } from '../repositories/campaign-recipient.repository.js';
 
@@ -52,6 +45,20 @@ interface CampaignRow {
   typing_simulation: number | null;
   retry_count: number | null;
   scheduled_at: string | null;
+}
+
+interface RecipientRow {
+  id: string;
+  campaign_id: string;
+  contact_id: string;
+  full_name: string;
+  phone_number: string;
+  status: CampaignRecipientStatus;
+  attempt_count: number;
+  error_message: string | null;
+  whatsapp_message_id: string | null;
+  sent_at: string | null;
+  updated_at: string;
 }
 
 interface RuntimeState {
@@ -570,8 +577,15 @@ async function runQueue(
         continue;
       }
 
-      const recipient =
-        findNextPendingCampaignRecipient(campaignId);
+      const recipient = getDatabase()
+        .prepare(`
+          SELECT *
+          FROM campaign_recipients
+          WHERE campaign_id = ? AND status = 'pending'
+          ORDER BY created_at ASC
+          LIMIT 1
+        `)
+        .get(campaignId) as RecipientRow | undefined;
 
       if (!recipient) {
         const now = new Date().toISOString();
@@ -598,21 +612,29 @@ async function runQueue(
         currentAttempt += 1
       ) {
         if (state.cancelled || state.paused) {
-          markCampaignRecipientPending(
-            recipient.id,
-            new Date().toISOString(),
-          );
+          getDatabase().prepare(`
+            UPDATE campaign_recipients
+            SET status = 'pending', updated_at = ?
+            WHERE id = ?
+          `).run(new Date().toISOString(), recipient.id);
           break;
         }
 
         const attemptStartedAt = new Date().toISOString();
-        const recipientClaimSucceeded =
-          claimCampaignRecipient(
-            recipient.id,
-            attemptStartedAt,
-          );
+        const claimResult = getDatabase()
+          .prepare(`
+            UPDATE campaign_recipients
+            SET
+              status = 'sending',
+              attempt_count = attempt_count + 1,
+              error_message = NULL,
+              updated_at = ?
+            WHERE id = ?
+              AND status = 'pending'
+          `)
+          .run(attemptStartedAt, recipient.id);
 
-        if (!recipientClaimSucceeded) {
+        if (claimResult.changes === 0) {
           console.warn(
             `[Campaign Queue] ${campaignId}: Alıcı başka bir işlem tarafından alınmış olabilir: ${recipient.id}`,
           );
@@ -634,12 +656,21 @@ async function runQueue(
           const sentAt =
             result.sentAt ?? new Date().toISOString();
 
-          markCampaignRecipientSent({
-            recipientId: recipient.id,
-            whatsappMessageId:
-              result.whatsappMessageId,
+          getDatabase().prepare(`
+            UPDATE campaign_recipients
+            SET
+              status = 'sent',
+              error_message = NULL,
+              whatsapp_message_id = ?,
+              sent_at = ?,
+              updated_at = ?
+            WHERE id = ?
+          `).run(
+            result.whatsappMessageId,
             sentAt,
-          });
+            sentAt,
+            recipient.id,
+          );
 
           sentSuccessfully = true;
           lastErrorMessage = null;
@@ -654,18 +685,32 @@ async function runQueue(
             currentAttempt < maximumAttempts;
 
           if (!hasAnotherAttempt) {
-            markCampaignRecipientFailed(
-              recipient.id,
+            getDatabase().prepare(`
+              UPDATE campaign_recipients
+              SET
+                status = 'failed',
+                error_message = ?,
+                updated_at = ?
+              WHERE id = ?
+            `).run(
               lastErrorMessage,
               new Date().toISOString(),
+              recipient.id,
             );
             break;
           }
 
-          markCampaignRecipientPending(
-            recipient.id,
-            new Date().toISOString(),
+          getDatabase().prepare(`
+            UPDATE campaign_recipients
+            SET
+              status = 'pending',
+              error_message = ?,
+              updated_at = ?
+            WHERE id = ?
+          `).run(
             `Tekrar denenecek (${currentAttempt}/${maximumAttempts - 1}): ${lastErrorMessage}`,
+            new Date().toISOString(),
+            recipient.id,
           );
 
           const retryWaitSeconds = Math.min(
@@ -678,10 +723,11 @@ async function runQueue(
           );
 
           if (!continued) {
-            markCampaignRecipientPending(
-              recipient.id,
-              new Date().toISOString(),
-            );
+            getDatabase().prepare(`
+              UPDATE campaign_recipients
+              SET status = 'pending', updated_at = ?
+              WHERE id = ?
+            `).run(new Date().toISOString(), recipient.id);
             break;
           }
         }
@@ -815,10 +861,15 @@ export function startCampaign(
 
   seedCampaignRecipients(campaign);
 
-  const remaining =
-    countPendingCampaignRecipients(campaignId);
+  const remaining = getDatabase()
+    .prepare(`
+      SELECT COUNT(*) AS total
+      FROM campaign_recipients
+      WHERE campaign_id = ? AND status = 'pending'
+    `)
+    .get(campaignId) as { total: number };
 
-  if (remaining === 0) {
+  if (Number(remaining.total ?? 0) === 0) {
     throw new Error('Kampanyada gönderilecek bekleyen alıcı yok.');
   }
 
