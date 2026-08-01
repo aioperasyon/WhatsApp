@@ -6,12 +6,6 @@ import type {
 } from '../../../shared/interfaces/campaign.js';
 import { getDatabase } from '../database/database.js';
 import {
-  cancelCampaignRecord,
-  failCampaignRecord,
-  pauseCampaignRecord,
-  resumeCampaignRecord,
-} from '../repositories/campaign-control.repository.js';
-import {
   claimCampaignStart,
   completeCampaign,
   getCampaignStatus,
@@ -368,7 +362,11 @@ async function runQueue(
         ? reason.message
         : 'Kampanya kuyruğu çalıştırılamadı.';
 
-    failCampaignRecord(campaignId);
+    getDatabase().prepare(`
+      UPDATE campaigns
+      SET status = 'failed', updated_at = ?
+      WHERE id = ?
+    `).run(new Date().toISOString(), campaignId);
 
     console.error(
       `[Campaign] ${campaignId} queue failed: ${message}`,
@@ -522,13 +520,11 @@ export function pauseCampaign(
   runtimeStates.set(campaignId, state);
   wakeCampaignRuntime(state);
 
-  const paused = pauseCampaignRecord(campaignId);
-
-  if (!paused) {
-    throw new Error(
-      'Kampanya duraklatma kilidi alınamadı. Durum başka bir işlem tarafından değiştirilmiş olabilir.',
-    );
-  }
+  getDatabase().prepare(`
+    UPDATE campaigns
+    SET status = 'paused', updated_at = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), campaignId);
 
   return {
     campaign: readCampaign(campaignId),
@@ -562,9 +558,15 @@ export function resumeCampaign(
   wakeCampaignRuntime(state);
   runtimeStates.set(campaignId, state);
 
-  const resumed = resumeCampaignRecord(campaignId);
+  const resumeResult = getDatabase()
+    .prepare(`
+      UPDATE campaigns
+      SET status = 'running', updated_at = ?
+      WHERE id = ? AND status = 'paused'
+    `)
+    .run(new Date().toISOString(), campaignId);
 
-  if (!resumed) {
+  if (resumeResult.changes === 0) {
     throw new Error(
       'Kampanya devam ettirme kilidi alınamadı. Durum başka bir işlem tarafından değiştirilmiş olabilir.',
     );
@@ -603,7 +605,23 @@ export function cancelCampaign(
   runtimeStates.set(campaignId, state);
   wakeCampaignRuntime(state);
 
-  cancelCampaignRecord(campaignId);
+  const now = new Date().toISOString();
+  const database = getDatabase();
+  const transaction = database.transaction(() => {
+    database.prepare(`
+      UPDATE campaign_recipients
+      SET status = 'cancelled', updated_at = ?
+      WHERE campaign_id = ? AND status IN ('pending', 'sending')
+    `).run(now, campaignId);
+
+    database.prepare(`
+      UPDATE campaigns
+      SET status = 'cancelled', completed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(now, now, campaignId);
+  });
+
+  transaction();
   refreshCampaignRecipientCounts(campaignId);
 
   return {
