@@ -47,18 +47,6 @@ const IPC_CHANNELS = {
   recipients: 'campaigns:list-recipients',
 } as const;
 
-function normalizeValues(
-  values: string[] | undefined,
-): string[] {
-  return Array.from(
-    new Set(
-      (values ?? [])
-        .map((value) => value.trim())
-        .filter(Boolean),
-    ),
-  ).sort((a, b) => a.localeCompare(b, 'tr'));
-}
-
 function buildAudienceWhere(
   request: CampaignAudienceRequest,
 ): {

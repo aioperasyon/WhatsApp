@@ -1,0 +1,11 @@
+AI Operasyon — Paket 13G-12
+Campaign Repository Katmanı
+
+Yeni dosya:
+- src/main/repositories/campaign.repository.ts
+
+Güncellenen dosya:
+- src/main/ipc/register-campaign-ipc.ts
+
+Önerilen commit mesajı:
+refactor(campaign): extract campaign repository

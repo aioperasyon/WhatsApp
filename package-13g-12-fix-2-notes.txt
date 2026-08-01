@@ -1,0 +1,4 @@
+AI Operasyon — 13G-12-FIX-2
+
+normalizeValues yardımcı fonksiyonunu register-campaign-ipc.ts içine geri ekler.
+Audience estimate ve analyze fonksiyonlarının derlenmesini düzeltir.
