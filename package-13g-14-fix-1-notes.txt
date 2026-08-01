@@ -1,0 +1,14 @@
+AI Operasyon — 13G-14-FIX-1
+
+13G-14 paketindeki fonksiyon ayrıştırma hatasını düzeltir.
+
+Neden:
+buildAudienceQuery fonksiyonundaki template literal ifadeleri nedeniyle
+önceki süslü parantez ayrıştırıcısı fonksiyon gövdesinin bir kısmını bıraktı.
+
+Çözüm:
+- Queue dosyasını 13G-14 yedeğinden geri yükler.
+- countSentToday ile removeFinishedRuntimeState arasındaki dört bitişik
+  repository fonksiyonunu tek blok halinde güvenli şekilde kaldırır.
+- Yeni repository çağrılarını ekler.
+- Typecheck çalıştırır.
