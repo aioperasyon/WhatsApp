@@ -1,0 +1,929 @@
+import { randomUUID } from 'node:crypto';
+import { getDatabase } from '../database/database.js';
+import { sendCampaignMessage } from './whatsapp-connection.service.js';
+const runtimeStates = new Map();
+const SCHEDULER_INTERVAL_MS = 30000;
+let campaignSchedulerTimer = null;
+let campaignSchedulerRunning = false;
+let campaignSchedulerGeneration = 0;
+const scheduledCampaignClaims = new Set();
+function parseValues(value) {
+    try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed)
+            ? parsed.filter((item) => typeof item === 'string')
+            : [];
+    }
+    catch {
+        return [];
+    }
+}
+function mapCampaign(row) {
+    return {
+        id: row.id,
+        name: row.name,
+        accountId: row.account_id,
+        accountName: row.account_name,
+        message: row.message,
+        sectors: parseValues(row.sectors_json),
+        cities: parseValues(row.cities_json),
+        onlyAllowed: row.only_allowed === 1,
+        estimatedRecipients: row.estimated_recipients,
+        status: row.status,
+        totalRecipients: row.total_recipients,
+        sentCount: row.sent_count,
+        failedCount: row.failed_count,
+        pendingCount: row.pending_count,
+        startedAt: row.started_at,
+        completedAt: row.completed_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        settings: {
+            description: row.description ?? null,
+            minDelaySeconds: row.min_delay_seconds ?? 6,
+            maxDelaySeconds: row.max_delay_seconds ?? 14,
+            batchSize: row.batch_size ?? 30,
+            batchPauseMinSeconds: row.batch_pause_min_seconds ?? 45,
+            batchPauseMaxSeconds: row.batch_pause_max_seconds ?? 90,
+            dailyLimit: row.daily_limit ?? null,
+            workStartTime: row.work_start_time ?? '09:00',
+            workEndTime: row.work_end_time ?? '18:30',
+            typingSimulation: (row.typing_simulation ?? 1) === 1,
+            retryCount: row.retry_count ?? 2,
+            scheduledAt: row.scheduled_at ?? null,
+        },
+    };
+}
+function mapRecipient(row) {
+    return {
+        id: row.id,
+        campaignId: row.campaign_id,
+        contactId: row.contact_id,
+        fullName: row.full_name,
+        phoneNumber: row.phone_number,
+        status: row.status,
+        attemptCount: row.attempt_count,
+        errorMessage: row.error_message,
+        whatsappMessageId: row.whatsapp_message_id,
+        sentAt: row.sent_at,
+        updatedAt: row.updated_at,
+    };
+}
+function readCampaign(id) {
+    const row = getDatabase()
+        .prepare(`
+      SELECT
+        c.*,
+        a.name AS account_name,
+        s.description,
+        s.min_delay_seconds,
+        s.max_delay_seconds,
+        s.batch_size,
+        s.batch_pause_min_seconds,
+        s.batch_pause_max_seconds,
+        s.daily_limit,
+        s.work_start_time,
+        s.work_end_time,
+        s.typing_simulation,
+        s.retry_count,
+        s.scheduled_at
+      FROM campaigns c
+      LEFT JOIN whatsapp_accounts a ON a.id = c.account_id
+      LEFT JOIN campaign_settings s ON s.campaign_id = c.id
+      WHERE c.id = ?
+    `)
+        .get(id);
+    if (!row) {
+        throw new Error('Kampanya bulunamadı.');
+    }
+    return mapCampaign(row);
+}
+function randomInteger(minimum, maximum) {
+    const min = Math.max(0, Math.trunc(Math.min(minimum, maximum)));
+    const max = Math.max(min, Math.trunc(Math.max(minimum, maximum)));
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+async function waitInterruptibly(state, milliseconds) {
+    if (state.cancelled || state.paused) {
+        return false;
+    }
+    const duration = Math.max(0, milliseconds);
+    if (duration === 0) {
+        return true;
+    }
+    return new Promise((resolve) => {
+        let finished = false;
+        const finish = () => {
+            if (finished) {
+                return;
+            }
+            finished = true;
+            clearTimeout(timer);
+            if (state.wakeWait === finish) {
+                state.wakeWait = undefined;
+            }
+            resolve(!state.cancelled && !state.paused);
+        };
+        const timer = setTimeout(finish, duration);
+        state.wakeWait = finish;
+        if (state.cancelled || state.paused) {
+            finish();
+        }
+    });
+}
+function wakeRuntimeWait(state) {
+    const wake = state.wakeWait;
+    state.wakeWait = undefined;
+    wake?.();
+}
+function parseTime(value) {
+    const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+    if (!match) {
+        return { hour: 0, minute: 0 };
+    }
+    return {
+        hour: Math.min(23, Math.max(0, Number(match[1]))),
+        minute: Math.min(59, Math.max(0, Number(match[2]))),
+    };
+}
+function millisecondsUntilWorkingWindow(startValue, endValue, now = new Date()) {
+    const start = parseTime(startValue);
+    const end = parseTime(endValue);
+    const startMinutes = start.hour * 60 + start.minute;
+    const endMinutes = end.hour * 60 + end.minute;
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    if (startMinutes === endMinutes) {
+        return 0;
+    }
+    const inside = startMinutes < endMinutes
+        ? nowMinutes >= startMinutes && nowMinutes < endMinutes
+        : nowMinutes >= startMinutes || nowMinutes < endMinutes;
+    if (inside) {
+        return 0;
+    }
+    const target = new Date(now);
+    target.setSeconds(0, 0);
+    target.setHours(start.hour, start.minute, 0, 0);
+    if (target.getTime() <= now.getTime()) {
+        target.setDate(target.getDate() + 1);
+    }
+    return Math.max(1000, target.getTime() - now.getTime());
+}
+function millisecondsUntilNextLocalDay(now = new Date()) {
+    const next = new Date(now);
+    next.setHours(24, 0, 1, 0);
+    return Math.max(1000, next.getTime() - now.getTime());
+}
+function countSentToday(campaignId) {
+    const row = getDatabase()
+        .prepare(`
+      SELECT COUNT(*) AS total
+      FROM campaign_recipients
+      WHERE
+        campaign_id = ?
+        AND status = 'sent'
+        AND date(sent_at, 'localtime') = date('now', 'localtime')
+    `)
+        .get(campaignId);
+    return Number(row.total ?? 0);
+}
+function buildAudienceQuery(campaign) {
+    const where = [];
+    const parameters = [];
+    if (campaign.onlyAllowed) {
+        where.push(`permission_status = 'allowed'`);
+    }
+    if (campaign.sectors.length > 0) {
+        where.push(`sector IN (${campaign.sectors.map(() => '?').join(', ')})`);
+        parameters.push(...campaign.sectors);
+    }
+    if (campaign.cities.length > 0) {
+        where.push(`city IN (${campaign.cities.map(() => '?').join(', ')})`);
+        parameters.push(...campaign.cities);
+    }
+    return {
+        sql: where.length > 0 ? `WHERE ${where.join(' AND ')}` : '',
+        parameters,
+    };
+}
+function seedRecipients(campaign) {
+    const database = getDatabase();
+    const existing = database
+        .prepare(`
+      SELECT COUNT(*) AS total
+      FROM campaign_recipients
+      WHERE campaign_id = ?
+    `)
+        .get(campaign.id);
+    if (Number(existing.total ?? 0) > 0) {
+        return;
+    }
+    const built = buildAudienceQuery(campaign);
+    const contacts = database
+        .prepare(`
+      SELECT id, full_name, phone_number
+      FROM crm_contacts
+      ${built.sql}
+      ORDER BY created_at ASC
+    `)
+        .all(...built.parameters);
+    const now = new Date().toISOString();
+    const insert = database.prepare(`
+    INSERT INTO campaign_recipients (
+      id,
+      campaign_id,
+      contact_id,
+      full_name,
+      phone_number,
+      status,
+      attempt_count,
+      error_message,
+      whatsapp_message_id,
+      sent_at,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, ?, ?)
+  `);
+    const transaction = database.transaction(() => {
+        for (const contact of contacts) {
+            insert.run(randomUUID(), campaign.id, contact.id, contact.full_name, contact.phone_number, now, now);
+        }
+        database.prepare(`
+      UPDATE campaigns
+      SET
+        total_recipients = ?,
+        pending_count = ?,
+        sent_count = 0,
+        failed_count = 0,
+        updated_at = ?
+      WHERE id = ?
+    `).run(contacts.length, contacts.length, now, campaign.id);
+    });
+    transaction();
+}
+function refreshCounts(campaignId) {
+    const database = getDatabase();
+    const counts = database
+        .prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN status IN ('pending', 'sending') THEN 1 ELSE 0 END) AS pending
+      FROM campaign_recipients
+      WHERE campaign_id = ?
+    `)
+        .get(campaignId);
+    database.prepare(`
+    UPDATE campaigns
+    SET
+      total_recipients = ?,
+      sent_count = ?,
+      failed_count = ?,
+      pending_count = ?,
+      updated_at = ?
+    WHERE id = ?
+  `).run(Number(counts.total ?? 0), Number(counts.sent ?? 0), Number(counts.failed ?? 0), Number(counts.pending ?? 0), new Date().toISOString(), campaignId);
+}
+function removeFinishedRuntimeState(campaignId, state) {
+    const row = getDatabase()
+        .prepare(`
+      SELECT status
+      FROM campaigns
+      WHERE id = ?
+      LIMIT 1
+    `)
+        .get(campaignId);
+    if (!row ||
+        row.status === 'completed' ||
+        row.status === 'cancelled' ||
+        row.status === 'failed') {
+        state.wakeWait = undefined;
+        runtimeStates.delete(campaignId);
+    }
+}
+function reconcileCampaignState(campaignId) {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    const reconcile = database.transaction(() => {
+        const counts = database.prepare(`
+      SELECT
+        SUM(
+          CASE
+            WHEN status IN ('pending', 'sending')
+              THEN 1
+            ELSE 0
+          END
+        ) AS pending_count,
+        SUM(
+          CASE
+            WHEN status = 'sent'
+              THEN 1
+            ELSE 0
+          END
+        ) AS sent_count,
+        SUM(
+          CASE
+            WHEN status = 'failed'
+              THEN 1
+            ELSE 0
+          END
+        ) AS failed_count,
+        COUNT(*) AS total_count
+      FROM campaign_recipients
+      WHERE campaign_id = ?
+    `).get(campaignId);
+        const pendingCount = Number(counts.pending_count ?? 0);
+        const sentCount = Number(counts.sent_count ?? 0);
+        const failedCount = Number(counts.failed_count ?? 0);
+        const totalCount = Number(counts.total_count ?? 0);
+        database.prepare(`
+      UPDATE campaigns
+      SET
+        pending_count = ?,
+        sent_count = ?,
+        failed_count = ?,
+        status = CASE
+          WHEN status = 'cancelled'
+            THEN 'cancelled'
+          WHEN ? > 0
+            THEN status
+          WHEN ? = 0
+            THEN status
+          ELSE 'completed'
+        END,
+        updated_at = ?
+      WHERE id = ?
+    `).run(pendingCount, sentCount, failedCount, pendingCount, totalCount, now, campaignId);
+    });
+    reconcile();
+}
+async function runQueue(campaignId) {
+    const state = runtimeStates.get(campaignId);
+    if (!state || state.running) {
+        return;
+    }
+    state.running = true;
+    let sentSinceBatchPause = 0;
+    try {
+        while (!state.cancelled) {
+            if (state.paused) {
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                continue;
+            }
+            const campaign = readCampaign(campaignId);
+            if (!campaign.accountId) {
+                throw new Error('Kampanya gönderen WhatsApp hesabı seçilmemiş.');
+            }
+            const workingWait = millisecondsUntilWorkingWindow(campaign.settings.workStartTime, campaign.settings.workEndTime);
+            if (workingWait > 0) {
+                const continued = await waitInterruptibly(state, workingWait);
+                if (!continued) {
+                    continue;
+                }
+            }
+            const dailyLimit = campaign.settings.dailyLimit;
+            if (dailyLimit !== null &&
+                dailyLimit > 0 &&
+                countSentToday(campaignId) >= dailyLimit) {
+                const continued = await waitInterruptibly(state, millisecondsUntilNextLocalDay());
+                if (!continued) {
+                    continue;
+                }
+            }
+            const recipient = getDatabase()
+                .prepare(`
+          SELECT *
+          FROM campaign_recipients
+          WHERE campaign_id = ? AND status = 'pending'
+          ORDER BY created_at ASC
+          LIMIT 1
+        `)
+                .get(campaignId);
+            if (!recipient) {
+                const now = new Date().toISOString();
+                getDatabase().prepare(`
+          UPDATE campaigns
+          SET status = 'completed', completed_at = ?, updated_at = ?
+          WHERE id = ?
+        `).run(now, now, campaignId);
+                refreshCounts(campaignId);
+                return;
+            }
+            const maximumAttempts = 1 + Math.max(0, campaign.settings.retryCount);
+            let sentSuccessfully = false;
+            let lastErrorMessage = null;
+            for (let currentAttempt = 1; currentAttempt <= maximumAttempts; currentAttempt += 1) {
+                if (state.cancelled || state.paused) {
+                    getDatabase().prepare(`
+            UPDATE campaign_recipients
+            SET status = 'pending', updated_at = ?
+            WHERE id = ?
+          `).run(new Date().toISOString(), recipient.id);
+                    break;
+                }
+                const attemptStartedAt = new Date().toISOString();
+                getDatabase().prepare(`
+          UPDATE campaign_recipients
+          SET
+            status = 'sending',
+            attempt_count = attempt_count + 1,
+            error_message = NULL,
+            updated_at = ?
+          WHERE id = ?
+        `).run(attemptStartedAt, recipient.id);
+                refreshCounts(campaignId);
+                try {
+                    const result = await sendCampaignMessage({
+                        accountId: campaign.accountId,
+                        phoneNumber: recipient.phone_number,
+                        text: campaign.message,
+                        typingSimulation: campaign.settings.typingSimulation,
+                    });
+                    const sentAt = result.sentAt ?? new Date().toISOString();
+                    getDatabase().prepare(`
+            UPDATE campaign_recipients
+            SET
+              status = 'sent',
+              error_message = NULL,
+              whatsapp_message_id = ?,
+              sent_at = ?,
+              updated_at = ?
+            WHERE id = ?
+          `).run(result.whatsappMessageId, sentAt, sentAt, recipient.id);
+                    sentSuccessfully = true;
+                    lastErrorMessage = null;
+                    break;
+                }
+                catch (reason) {
+                    lastErrorMessage =
+                        reason instanceof Error
+                            ? reason.message
+                            : 'Bilinmeyen gönderim hatası.';
+                    const hasAnotherAttempt = currentAttempt < maximumAttempts;
+                    if (!hasAnotherAttempt) {
+                        getDatabase().prepare(`
+              UPDATE campaign_recipients
+              SET
+                status = 'failed',
+                error_message = ?,
+                updated_at = ?
+              WHERE id = ?
+            `).run(lastErrorMessage, new Date().toISOString(), recipient.id);
+                        break;
+                    }
+                    getDatabase().prepare(`
+            UPDATE campaign_recipients
+            SET
+              status = 'pending',
+              error_message = ?,
+              updated_at = ?
+            WHERE id = ?
+          `).run(`Tekrar denenecek (${currentAttempt}/${maximumAttempts - 1}): ${lastErrorMessage}`, new Date().toISOString(), recipient.id);
+                    const retryWaitSeconds = Math.min(30, Math.max(3, currentAttempt * 5));
+                    const continued = await waitInterruptibly(state, retryWaitSeconds * 1000);
+                    if (!continued) {
+                        getDatabase().prepare(`
+              UPDATE campaign_recipients
+              SET status = 'pending', updated_at = ?
+              WHERE id = ?
+            `).run(new Date().toISOString(), recipient.id);
+                        break;
+                    }
+                }
+            }
+            refreshCounts(campaignId);
+            if (state.cancelled || state.paused) {
+                continue;
+            }
+            if (sentSuccessfully) {
+                sentSinceBatchPause += 1;
+            }
+            const batchSize = Math.max(1, campaign.settings.batchSize);
+            if (sentSinceBatchPause >= batchSize) {
+                sentSinceBatchPause = 0;
+                const batchPauseSeconds = randomInteger(campaign.settings.batchPauseMinSeconds, campaign.settings.batchPauseMaxSeconds);
+                await waitInterruptibly(state, batchPauseSeconds * 1000);
+                continue;
+            }
+            const delaySeconds = randomInteger(campaign.settings.minDelaySeconds, campaign.settings.maxDelaySeconds);
+            await waitInterruptibly(state, delaySeconds * 1000);
+        }
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Kampanya kuyruğu çalıştırılamadı.';
+        getDatabase().prepare(`
+      UPDATE campaigns
+      SET status = 'failed', updated_at = ?
+      WHERE id = ?
+    `).run(new Date().toISOString(), campaignId);
+        console.error(`[Campaign] ${campaignId} queue failed: ${message}`);
+    }
+    finally {
+        state.running = false;
+        state.wakeWait = undefined;
+        try {
+            reconcileCampaignState(campaignId);
+        }
+        catch (reason) {
+            const message = reason instanceof Error
+                ? reason.message
+                : 'Kampanya durumu uzlaştırılamadı.';
+            console.error(`[Campaign Queue] ${campaignId}: ${message}`);
+        }
+        if (state.cancelled) {
+            runtimeStates.delete(campaignId);
+        }
+        else {
+            try {
+                removeFinishedRuntimeState(campaignId, state);
+            }
+            catch (reason) {
+                const message = reason instanceof Error
+                    ? reason.message
+                    : 'Runtime durumu temizlenemedi.';
+                console.error(`[Campaign Queue] ${campaignId}: ${message}`);
+            }
+        }
+    }
+}
+export function startCampaign(campaignId) {
+    const campaign = readCampaign(campaignId);
+    if (!campaign.accountId) {
+        throw new Error('Kampanyayı başlatmak için bir WhatsApp hesabı seçin.');
+    }
+    if (!['ready', 'paused', 'failed'].includes(campaign.status)) {
+        throw new Error('Bu kampanya mevcut durumunda başlatılamaz.');
+    }
+    seedRecipients(campaign);
+    const remaining = getDatabase()
+        .prepare(`
+      SELECT COUNT(*) AS total
+      FROM campaign_recipients
+      WHERE campaign_id = ? AND status = 'pending'
+    `)
+        .get(campaignId);
+    if (Number(remaining.total ?? 0) === 0) {
+        throw new Error('Kampanyada gönderilecek bekleyen alıcı yok.');
+    }
+    const now = new Date().toISOString();
+    getDatabase().prepare(`
+    UPDATE campaigns
+    SET
+      status = 'running',
+      started_at = COALESCE(started_at, ?),
+      completed_at = NULL,
+      updated_at = ?
+    WHERE id = ?
+  `).run(now, now, campaignId);
+    const state = runtimeStates.get(campaignId) ??
+        { cancelled: false, paused: false, running: false };
+    state.cancelled = false;
+    state.paused = false;
+    runtimeStates.set(campaignId, state);
+    void runQueue(campaignId);
+    return {
+        campaign: readCampaign(campaignId),
+        message: 'Kampanya gönderim kuyruğu başlatıldı.',
+    };
+}
+export function pauseCampaign(campaignId) {
+    const campaign = readCampaign(campaignId);
+    if (campaign.status !== 'running') {
+        throw new Error('Yalnızca çalışan kampanya durdurulabilir.');
+    }
+    const state = runtimeStates.get(campaignId) ??
+        { cancelled: false, paused: false, running: false };
+    state.paused = true;
+    runtimeStates.set(campaignId, state);
+    wakeRuntimeWait(state);
+    getDatabase().prepare(`
+    UPDATE campaigns
+    SET status = 'paused', updated_at = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), campaignId);
+    return {
+        campaign: readCampaign(campaignId),
+        message: 'Kampanya duraklatıldı.',
+    };
+}
+export function resumeCampaign(campaignId) {
+    const campaign = readCampaign(campaignId);
+    if (campaign.status !== 'paused') {
+        throw new Error('Yalnızca duraklatılmış kampanya devam ettirilebilir.');
+    }
+    const state = runtimeStates.get(campaignId) ??
+        { cancelled: false, paused: false, running: false };
+    state.cancelled = false;
+    state.paused = false;
+    wakeRuntimeWait(state);
+    runtimeStates.set(campaignId, state);
+    getDatabase().prepare(`
+    UPDATE campaigns
+    SET status = 'running', updated_at = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), campaignId);
+    void runQueue(campaignId);
+    return {
+        campaign: readCampaign(campaignId),
+        message: 'Kampanya devam ettirildi.',
+    };
+}
+export function cancelCampaign(campaignId) {
+    const campaign = readCampaign(campaignId);
+    if (!['running', 'paused'].includes(campaign.status)) {
+        throw new Error('Yalnızca çalışan veya duraklatılmış kampanya iptal edilebilir.');
+    }
+    const state = runtimeStates.get(campaignId) ??
+        { cancelled: false, paused: false, running: false };
+    state.cancelled = true;
+    state.paused = false;
+    runtimeStates.set(campaignId, state);
+    wakeRuntimeWait(state);
+    const now = new Date().toISOString();
+    const database = getDatabase();
+    const transaction = database.transaction(() => {
+        database.prepare(`
+      UPDATE campaign_recipients
+      SET status = 'cancelled', updated_at = ?
+      WHERE campaign_id = ? AND status IN ('pending', 'sending')
+    `).run(now, campaignId);
+        database.prepare(`
+      UPDATE campaigns
+      SET status = 'cancelled', completed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(now, now, campaignId);
+    });
+    transaction();
+    refreshCounts(campaignId);
+    return {
+        campaign: readCampaign(campaignId),
+        message: 'Kampanya iptal edildi.',
+    };
+}
+export function listCampaignRecipients(request) {
+    const campaignId = request.campaignId?.trim();
+    if (!campaignId) {
+        throw new Error('Kampanya kimliği zorunludur.');
+    }
+    const limit = Math.min(500, Math.max(1, request.limit ?? 100));
+    const offset = Math.max(0, request.offset ?? 0);
+    const database = getDatabase();
+    const totalRow = database
+        .prepare(`
+      SELECT COUNT(*) AS total
+      FROM campaign_recipients
+      WHERE campaign_id = ?
+    `)
+        .get(campaignId);
+    const rows = database
+        .prepare(`
+      SELECT *
+      FROM campaign_recipients
+      WHERE campaign_id = ?
+      ORDER BY
+        CASE status
+          WHEN 'sending' THEN 1
+          WHEN 'pending' THEN 2
+          WHEN 'failed' THEN 3
+          WHEN 'sent' THEN 4
+          ELSE 5
+        END,
+        updated_at DESC
+      LIMIT ? OFFSET ?
+    `)
+        .all(campaignId, limit, offset);
+    return {
+        recipients: rows.map(mapRecipient),
+        total: Number(totalRow.total ?? 0),
+    };
+}
+export async function processScheduledCampaigns() {
+    if (campaignSchedulerRunning) {
+        return;
+    }
+    campaignSchedulerRunning = true;
+    try {
+        const now = Date.now();
+        const rows = getDatabase()
+            .prepare(`
+        SELECT
+          c.id,
+          s.scheduled_at
+        FROM campaigns c
+        INNER JOIN campaign_settings s
+          ON s.campaign_id = c.id
+        WHERE
+          c.status IN ('ready', 'scheduled')
+          AND s.scheduled_at IS NOT NULL
+          AND TRIM(s.scheduled_at) <> ''
+        ORDER BY s.scheduled_at ASC
+      `)
+            .all();
+        for (const row of rows) {
+            if (scheduledCampaignClaims.has(row.id)) {
+                continue;
+            }
+            const scheduledTime = Date.parse(row.scheduled_at);
+            if (!Number.isFinite(scheduledTime)) {
+                console.error(`[Campaign Scheduler] Geçersiz planlama tarihi: ${row.id} / ${row.scheduled_at}`);
+                continue;
+            }
+            if (scheduledTime > now) {
+                continue;
+            }
+            scheduledCampaignClaims.add(row.id);
+            try {
+                startCampaign(row.id);
+            }
+            catch (reason) {
+                const message = reason instanceof Error
+                    ? reason.message
+                    : 'Planlanan kampanya başlatılamadı.';
+                console.error(`[Campaign Scheduler] ${row.id}: ${message}`);
+            }
+            finally {
+                scheduledCampaignClaims.delete(row.id);
+            }
+        }
+    }
+    finally {
+        campaignSchedulerRunning = false;
+    }
+}
+async function runCampaignSchedulerTick() {
+    const schedulerGeneration = campaignSchedulerGeneration;
+    try {
+        await processScheduledCampaigns();
+        if (schedulerGeneration !== campaignSchedulerGeneration) {
+            return;
+        }
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Bilinmeyen scheduler hatası.';
+        console.error(`[Campaign Scheduler] Tarama başarısız: ${message}`);
+    }
+}
+export function startCampaignScheduler() {
+    if (campaignSchedulerTimer) {
+        return;
+    }
+    campaignSchedulerGeneration += 1;
+    void runCampaignSchedulerTick();
+    campaignSchedulerTimer = setInterval(() => {
+        void runCampaignSchedulerTick();
+    }, SCHEDULER_INTERVAL_MS);
+    campaignSchedulerTimer.unref?.();
+}
+export function stopCampaignScheduler() {
+    if (campaignSchedulerTimer) {
+        clearInterval(campaignSchedulerTimer);
+        campaignSchedulerTimer = null;
+    }
+    clearFinishedCampaignRuntimeStates();
+    campaignSchedulerGeneration += 1;
+    campaignSchedulerRunning = false;
+    scheduledCampaignClaims.clear();
+}
+export function clearFinishedCampaignRuntimeStates() {
+    for (const [campaignId, state] of runtimeStates.entries()) {
+        if (state.running) {
+            continue;
+        }
+        try {
+            removeFinishedRuntimeState(campaignId, state);
+        }
+        catch (reason) {
+            const message = reason instanceof Error
+                ? reason.message
+                : 'Runtime temizliği başarısız.';
+            console.error(`[Campaign Queue] ${campaignId}: ${message}`);
+        }
+    }
+}
+export function restartCampaignScheduler() {
+    stopCampaignScheduler();
+    startCampaignScheduler();
+}
+function recoverInterruptedRecipientRows() {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    const recoverTransaction = database.transaction(() => {
+        database.prepare(`
+      UPDATE campaign_recipients
+      SET
+        status = 'pending',
+        error_message = CASE
+          WHEN error_message IS NULL OR TRIM(error_message) = ''
+            THEN 'Uygulama kapanışı nedeniyle gönderim yeniden kuyruğa alındı.'
+          ELSE error_message
+        END,
+        updated_at = ?
+      WHERE status = 'sending'
+    `).run(now);
+        database.prepare(`
+      UPDATE campaigns
+      SET
+        pending_count = (
+          SELECT COUNT(*)
+          FROM campaign_recipients
+          WHERE
+            campaign_recipients.campaign_id = campaigns.id
+            AND campaign_recipients.status IN ('pending', 'sending')
+        ),
+        sent_count = (
+          SELECT COUNT(*)
+          FROM campaign_recipients
+          WHERE
+            campaign_recipients.campaign_id = campaigns.id
+            AND campaign_recipients.status = 'sent'
+        ),
+        failed_count = (
+          SELECT COUNT(*)
+          FROM campaign_recipients
+          WHERE
+            campaign_recipients.campaign_id = campaigns.id
+            AND campaign_recipients.status = 'failed'
+        ),
+        updated_at = ?
+      WHERE EXISTS (
+        SELECT 1
+        FROM campaign_recipients
+        WHERE campaign_recipients.campaign_id = campaigns.id
+      )
+    `).run(now);
+    });
+    recoverTransaction();
+}
+function recoverInterruptedCampaignStatuses() {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    const recoverStatuses = database.transaction(() => {
+        database.prepare(`
+      UPDATE campaigns
+      SET
+        status = CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM campaign_recipients
+            WHERE
+              campaign_recipients.campaign_id = campaigns.id
+              AND campaign_recipients.status = 'pending'
+          )
+            THEN 'paused'
+          WHEN EXISTS (
+            SELECT 1
+            FROM campaign_recipients
+            WHERE
+              campaign_recipients.campaign_id = campaigns.id
+              AND campaign_recipients.status = 'failed'
+          )
+            THEN 'completed'
+          ELSE 'completed'
+        END,
+        updated_at = ?
+      WHERE status = 'running'
+    `).run(now);
+        database.prepare(`
+      UPDATE campaigns
+      SET
+        status = 'completed',
+        updated_at = ?
+      WHERE
+        status IN ('paused', 'ready')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM campaign_recipients
+          WHERE
+            campaign_recipients.campaign_id = campaigns.id
+            AND campaign_recipients.status = 'pending'
+        )
+        AND EXISTS (
+          SELECT 1
+          FROM campaign_recipients
+          WHERE campaign_recipients.campaign_id = campaigns.id
+        )
+    `).run(now);
+    });
+    recoverStatuses();
+}
+export function recoverInterruptedCampaigns() {
+    recoverInterruptedRecipientRows();
+    recoverInterruptedCampaignStatuses();
+    const now = new Date().toISOString();
+    getDatabase().prepare(`
+    UPDATE campaign_recipients
+    SET status = 'pending', updated_at = ?
+    WHERE status = 'sending'
+  `).run(now);
+    getDatabase().prepare(`
+    UPDATE campaigns
+    SET status = 'paused', updated_at = ?
+    WHERE status = 'running'
+  `).run(now);
+}
+//# sourceMappingURL=campaign-queue.service.js.map

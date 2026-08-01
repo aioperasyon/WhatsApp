@@ -1,0 +1,1342 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from 'react';
+import type {
+  Campaign,
+  CampaignActionRequest,
+  CampaignActionResult,
+  CampaignAudienceAnalysis,
+  CampaignAudienceEstimate,
+  CampaignAudienceRequest,
+  CampaignDeleteRequest,
+  CampaignDeleteResult,
+  CampaignListRequest,
+  CampaignRecipientLogSnapshot,
+  CampaignSaveInput,
+  CampaignSnapshot,
+  CampaignStatus,
+} from '../../../shared/interfaces/campaign';
+import type { WhatsAppAccount } from '../../../shared/interfaces/whatsapp-account';
+import type {
+  MessageTemplate,
+  MessageTemplateListRequest,
+} from '../../../shared/interfaces/message-template';
+
+type CampaignApi = typeof window.desktopAPI & {
+  listCampaigns(request: CampaignListRequest): Promise<CampaignSnapshot>;
+  saveCampaign(input: CampaignSaveInput): Promise<Campaign>;
+  deleteCampaign(request: CampaignDeleteRequest): Promise<CampaignDeleteResult>;
+  estimateCampaignAudience(
+    request: CampaignAudienceRequest,
+  ): Promise<CampaignAudienceEstimate>;
+  analyzeCampaignAudience(
+    request: CampaignAudienceRequest & {
+      dailyLimit?: number | null;
+    },
+  ): Promise<CampaignAudienceAnalysis>;
+  getCampaignAudienceOptions(): Promise<{
+    sectors: string[];
+    cities: string[];
+  }>;
+  startCampaign(request: CampaignActionRequest): Promise<CampaignActionResult>;
+  pauseCampaign(request: CampaignActionRequest): Promise<CampaignActionResult>;
+  resumeCampaign(request: CampaignActionRequest): Promise<CampaignActionResult>;
+  cancelCampaign(request: CampaignActionRequest): Promise<CampaignActionResult>;
+  listCampaignRecipients(request: {
+    campaignId: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<CampaignRecipientLogSnapshot>;
+  listMessageTemplates(
+    request: MessageTemplateListRequest,
+  ): Promise<MessageTemplate[]>;
+  markMessageTemplateUsed(
+    request: { id: string },
+  ): Promise<{
+    updated: boolean;
+    usageCount: number;
+    lastUsedAt: string | null;
+  }>;
+};
+
+const EMPTY_FORM: CampaignSaveInput = {
+  name: '',
+  accountId: '',
+  message: '',
+  sectors: [],
+  cities: [],
+  onlyAllowed: true,
+  status: 'draft',
+  description: '',
+  minDelaySeconds: 6,
+  maxDelaySeconds: 14,
+  batchSize: 30,
+  batchPauseMinSeconds: 45,
+  batchPauseMaxSeconds: 90,
+  dailyLimit: 250,
+  workStartTime: '09:00',
+  workEndTime: '18:30',
+  typingSimulation: true,
+  retryCount: 2,
+  scheduledAt: null,
+};
+
+function readError(reason: unknown): string {
+  return reason instanceof Error
+    ? reason.message
+    : 'Beklenmeyen bir kampanya hatası oluştu.';
+}
+
+function statusLabel(status: CampaignStatus): string {
+  const labels: Record<CampaignStatus, string> = {
+    draft: 'Taslak',
+    ready: 'Hazır',
+    scheduled: 'Planlandı',
+    running: 'Gönderiliyor',
+    paused: 'Duraklatıldı',
+    completed: 'Tamamlandı',
+    cancelled: 'İptal Edildi',
+    failed: 'Hata',
+  };
+  return labels[status];
+}
+
+function statusColor(status: CampaignStatus): string {
+  if (status === 'completed' || status === 'running') return '#71efd8';
+  if (status === 'failed' || status === 'cancelled') return '#ffacbb';
+  return '#f3d576';
+}
+
+export function CampaignPage() {
+  const api = window.desktopAPI as CampaignApi;
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [accounts, setAccounts] = useState<WhatsAppAccount[]>([]);
+  const [sectors, setSectors] = useState<string[]>([]);
+  const [cities, setCities] = useState<string[]>([]);
+  const [total, setTotal] = useState(0);
+  const [search, setSearch] = useState('');
+  const [form, setForm] = useState<CampaignSaveInput>(EMPTY_FORM);
+  const [formOpen, setFormOpen] = useState(false);
+  const [estimate, setEstimate] = useState(0);
+  const [audienceAnalysis, setAudienceAnalysis] =
+    useState<CampaignAudienceAnalysis | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [workingId, setWorkingId] = useState<string | null>(null);
+  const [logCampaign, setLogCampaign] = useState<Campaign | null>(null);
+  const [logs, setLogs] = useState<CampaignRecipientLogSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [templates, setTemplates] = useState<MessageTemplate[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [templateSearch, setTemplateSearch] = useState('');
+  const [templatePanelOpen, setTemplatePanelOpen] = useState(false);
+
+  const connectedAccounts = useMemo(
+    () => accounts.filter((account) => account.status === 'connected'),
+    [accounts],
+  );
+
+  const loadCampaigns = useCallback(async (): Promise<void> => {
+    try {
+      const result = await api.listCampaigns({
+        search,
+        limit: 100,
+        offset: 0,
+      });
+      setCampaigns(result.campaigns);
+      setTotal(result.total);
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, [api, search]);
+
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void api.listMessageTemplates({ search: '' })
+      .then((nextTemplates) => {
+        if (!cancelled) {
+          setTemplates(nextTemplates);
+        }
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) {
+          setError(readError(reason));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadCampaigns(), 180);
+    return () => window.clearTimeout(timer);
+  }, [loadCampaigns]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      window.desktopAPI.listWhatsAppAccounts(),
+      api.getCampaignAudienceOptions(),
+    ]).then(([nextAccounts, options]) => {
+      if (!cancelled) {
+        setAccounts(nextAccounts);
+        setSectors(options.sectors);
+        setCities(options.cities);
+      }
+    }).catch((reason: unknown) => {
+      if (!cancelled) setError(readError(reason));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    const hasActive = campaigns.some((campaign) =>
+      ['running', 'paused'].includes(campaign.status),
+    );
+    if (!hasActive) return;
+
+    const timer = window.setInterval(() => {
+      void loadCampaigns();
+      if (logCampaign) {
+        void api.listCampaignRecipients({
+          campaignId: logCampaign.id,
+          limit: 200,
+          offset: 0,
+        }).then(setLogs);
+      }
+    }, 1500);
+
+    return () => window.clearInterval(timer);
+  }, [api, campaigns, loadCampaigns, logCampaign]);
+
+  useEffect(() => {
+    if (!formOpen) return;
+    const timer = window.setTimeout(() => {
+      void Promise.all([
+        api.estimateCampaignAudience({
+          sectors: form.sectors,
+          cities: form.cities,
+          onlyAllowed: form.onlyAllowed,
+        }),
+        api.analyzeCampaignAudience({
+          sectors: form.sectors,
+          cities: form.cities,
+          onlyAllowed: form.onlyAllowed,
+          dailyLimit: form.dailyLimit,
+        }),
+      ]).then(([result, analysis]) => {
+        setEstimate(result.total);
+        setAudienceAnalysis(analysis);
+      }).catch((reason: unknown) => setError(readError(reason)));
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [
+    api,
+    form.cities,
+    form.dailyLimit,
+    form.onlyAllowed,
+    form.sectors,
+    formOpen,
+  ]);
+
+  const openNew = (): void => {
+    setForm({
+      ...EMPTY_FORM,
+      accountId: connectedAccounts[0]?.id ?? accounts[0]?.id ?? '',
+    });
+    setEstimate(0);
+    setSelectedTemplateId('');
+    setTemplateSearch('');
+    setTemplatePanelOpen(false);
+    setError(null);
+    setFormOpen(true);
+  };
+
+  const openEdit = (campaign: Campaign): void => {
+    setForm({
+      id: campaign.id,
+      name: campaign.name,
+      accountId: campaign.accountId ?? '',
+      message: campaign.message,
+      sectors: campaign.sectors,
+      cities: campaign.cities,
+      onlyAllowed: campaign.onlyAllowed,
+      status:
+        campaign.status === 'ready' || campaign.status === 'scheduled'
+          ? campaign.status
+          : 'draft',
+      description: campaign.settings.description ?? '',
+      minDelaySeconds: campaign.settings.minDelaySeconds,
+      maxDelaySeconds: campaign.settings.maxDelaySeconds,
+      batchSize: campaign.settings.batchSize,
+      batchPauseMinSeconds: campaign.settings.batchPauseMinSeconds,
+      batchPauseMaxSeconds: campaign.settings.batchPauseMaxSeconds,
+      dailyLimit: campaign.settings.dailyLimit,
+      workStartTime: campaign.settings.workStartTime,
+      workEndTime: campaign.settings.workEndTime,
+      typingSimulation: campaign.settings.typingSimulation,
+      retryCount: campaign.settings.retryCount,
+      scheduledAt: campaign.settings.scheduledAt,
+    });
+    setEstimate(campaign.estimatedRecipients);
+    setSelectedTemplateId('');
+    setTemplateSearch('');
+    setTemplatePanelOpen(false);
+    setFormOpen(true);
+  };
+
+
+  const filteredTemplates = useMemo(() => {
+    const query = templateSearch.trim().toLocaleLowerCase('tr-TR');
+
+    if (!query) {
+      return templates;
+    }
+
+    return templates.filter((template) =>
+      [template.name, template.category ?? '', template.content]
+        .join(' ')
+        .toLocaleLowerCase('tr-TR')
+        .includes(query),
+    );
+  }, [templateSearch, templates]);
+
+  const applyTemplate = (template: MessageTemplate): void => {
+    void api.markMessageTemplateUsed({ id: template.id })
+      .then((result) => {
+        if (!result.updated) return;
+        setTemplates((current) => current.map((item) =>
+          item.id === template.id
+            ? {
+                ...item,
+                usageCount: result.usageCount,
+                lastUsedAt: result.lastUsedAt,
+              }
+            : item,
+        ));
+      })
+      .catch((reason: unknown) => setError(readError(reason)));
+
+    setSelectedTemplateId(template.id);
+    setForm((current) => ({
+      ...current,
+      message: template.content,
+    }));
+    setTemplatePanelOpen(false);
+    setNotice(`“${template.name}” şablonu kampanya mesajına uygulandı.`);
+  };
+
+  const clearTemplateSelection = (): void => {
+    setSelectedTemplateId('');
+    setForm((current) => ({
+      ...current,
+      message: '',
+    }));
+  };
+
+  const toggleValue = (
+    field: 'sectors' | 'cities',
+    value: string,
+  ): void => {
+    setForm((current) => {
+      const values = current[field] ?? [];
+      return {
+        ...current,
+        [field]: values.includes(value)
+          ? values.filter((item) => item !== value)
+          : [...values, value],
+      };
+    });
+  };
+
+  const save = async (
+    event: FormEvent<HTMLFormElement>,
+  ): Promise<void> => {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await api.saveCampaign(form);
+      setFormOpen(false);
+      setNotice(`“${saved.name}” kaydedildi.`);
+      await loadCampaigns();
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const runAction = async (
+    campaign: Campaign,
+    action: 'start' | 'pause' | 'resume' | 'cancel',
+  ): Promise<void> => {
+    if (
+      action === 'start' &&
+      !window.confirm(
+        `“${campaign.name}” kampanyası ${campaign.estimatedRecipients} tahmini alıcı için başlatılsın mı?\n\nYalnızca izinli kişilere ve WhatsApp kullanım kurallarına uygun gönderim yapın.`,
+      )
+    ) {
+      return;
+    }
+
+    if (
+      action === 'cancel' &&
+      !window.confirm('Kampanya gönderimi iptal edilsin mi?')
+    ) {
+      return;
+    }
+
+    setWorkingId(campaign.id);
+    setError(null);
+    try {
+      const method = {
+        start: api.startCampaign,
+        pause: api.pauseCampaign,
+        resume: api.resumeCampaign,
+        cancel: api.cancelCampaign,
+      }[action].bind(api);
+      const result = await method({ id: campaign.id });
+      setNotice(result.message);
+      await loadCampaigns();
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setWorkingId(null);
+    }
+  };
+
+  const openLogs = async (campaign: Campaign): Promise<void> => {
+    setLogCampaign(campaign);
+    setLogs(null);
+    try {
+      setLogs(await api.listCampaignRecipients({
+        campaignId: campaign.id,
+        limit: 200,
+        offset: 0,
+      }));
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    }
+  };
+
+  return (
+    <section className="accounts-page">
+      <div className="page-card" style={{ width: 'min(1380px, 100%)' }}>
+        <header className="page-header">
+          <div>
+            <span className="eyebrow">TOPLU İLETİŞİM</span>
+            <h1>Kampanyalar</h1>
+            <p>
+              İzinli CRM kişilerine sıralı ve kontrollü WhatsApp
+              gönderimleri yönetin.
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <div className="account-count">
+              <span>Toplam kampanya</span>
+              <strong>{total}</strong>
+            </div>
+            <button className="primary-button" type="button" onClick={openNew}>
+              Yeni Kampanya
+            </button>
+          </div>
+        </header>
+
+        {error ? <div className="error-message">{error}</div> : null}
+        {notice ? (
+          <div style={{
+            marginBottom: 14, padding: '12px 14px',
+            border: '1px solid #255f59', borderRadius: 12,
+            color: '#87ead9', background: '#0b292b',
+          }}>
+            {notice}
+          </div>
+        ) : null}
+
+        <section className="panel">
+          <div className="form-field" style={{ marginBottom: 18 }}>
+            <label htmlFor="campaign-search">Kampanyalarda ara</label>
+            <input
+              id="campaign-search"
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Kampanya adı veya mesaj"
+            />
+          </div>
+
+          {loading ? (
+            <div className="empty-state"><strong>Yükleniyor...</strong></div>
+          ) : campaigns.length === 0 ? (
+            <div className="empty-state">
+              <strong>Henüz kampanya yok</strong>
+              <span>İlk kampanyanızı oluşturarak başlayın.</span>
+            </div>
+          ) : (
+            <div className="account-list">
+              {campaigns.map((campaign) => {
+                const progress = campaign.totalRecipients > 0
+                  ? Math.round(
+                      ((campaign.sentCount + campaign.failedCount) /
+                        campaign.totalRecipients) * 100,
+                    )
+                  : 0;
+                const locked = ['running', 'paused'].includes(campaign.status);
+
+                return (
+                  <article className="account-card" key={campaign.id}>
+                    <div className="account-card-main" style={{ flex: 1 }}>
+                      <span className="account-icon">K</span>
+                      <div className="account-details" style={{ flex: 1 }}>
+                        <strong>{campaign.name}</strong>
+                        <span>
+                          {campaign.accountName || 'Hesap seçilmedi'}
+                          {' · '}
+                          {campaign.totalRecipients || campaign.estimatedRecipients} alıcı
+                        </span>
+                        {campaign.totalRecipients > 0 ? (
+                          <div style={{ marginTop: 10 }}>
+                            <div style={{
+                              height: 8, overflow: 'hidden',
+                              borderRadius: 999, background: '#13283d',
+                            }}>
+                              <div style={{
+                                width: `${progress}%`,
+                                height: '100%',
+                                background: 'currentColor',
+                              }} />
+                            </div>
+                            <small style={{ marginTop: 6 }}>
+                              Gönderildi: {campaign.sentCount}
+                              {' · '}Başarısız: {campaign.failedCount}
+                              {' · '}Bekliyor: {campaign.pendingCount}
+                              {' · '}%{progress}
+                            </small>
+                          </div>
+                        ) : (
+                          <small>
+                            {campaign.settings.scheduledAt
+                              ? `Plan: ${new Date(
+                                  campaign.settings.scheduledAt,
+                                ).toLocaleString('tr-TR')} · `
+                              : ''}
+                            {campaign.sectors.length
+                              ? campaign.sectors.join(', ')
+                              : 'Tüm sektörler'}
+                            {' · '}
+                            {campaign.cities.length
+                              ? campaign.cities.join(', ')
+                              : 'Tüm iller'}
+                          </small>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="account-actions" style={{ flexWrap: 'wrap' }}>
+                      <span
+                        className="status-badge"
+                        style={{ color: statusColor(campaign.status) }}
+                      >
+                        {statusLabel(campaign.status)}
+                      </span>
+
+                      {campaign.status === 'ready' ||
+                      campaign.status === 'failed' ? (
+                        <button
+                          type="button"
+                          className="primary-button"
+                          disabled={workingId === campaign.id}
+                          onClick={() => void runAction(campaign, 'start')}
+                        >
+                          Başlat
+                        </button>
+                      ) : null}
+
+                      {campaign.status === 'running' ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => void runAction(campaign, 'pause')}
+                        >
+                          Duraklat
+                        </button>
+                      ) : null}
+
+                      {campaign.status === 'paused' ? (
+                        <button
+                          type="button"
+                          className="primary-button"
+                          onClick={() => void runAction(campaign, 'resume')}
+                        >
+                          Devam Et
+                        </button>
+                      ) : null}
+
+                      {locked ? (
+                        <button
+                          type="button"
+                          className="danger-button"
+                          onClick={() => void runAction(campaign, 'cancel')}
+                        >
+                          İptal Et
+                        </button>
+                      ) : null}
+
+                      {campaign.totalRecipients > 0 ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => void openLogs(campaign)}
+                        >
+                          Sonuçlar
+                        </button>
+                      ) : null}
+
+                      {!locked ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => openEdit(campaign)}
+                        >
+                          Düzenle
+                        </button>
+                      ) : null}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      </div>
+
+      {formOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <form
+            className="connection-modal"
+            style={{ width: 'min(980px, 100%)' }}
+            onSubmit={save}
+          >
+            <header className="modal-header">
+              <div>
+                <span className="eyebrow">KAMPANYA</span>
+                <h2>{form.id ? 'Kampanyayı Düzenle' : 'Yeni Kampanya'}</h2>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setFormOpen(false)}
+                disabled={saving}
+              >
+                ×
+              </button>
+            </header>
+
+            <div style={{
+              display: 'grid', gridTemplateColumns: '1fr 1fr',
+              gap: 16, marginTop: 22,
+            }}>
+              <div className="form-field">
+                <label>Kampanya adı</label>
+                <input
+                  value={form.name}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current, name: event.target.value,
+                    }))
+                  }
+                  required
+                />
+              </div>
+
+              <div className="form-field">
+                <label>Gönderen WhatsApp hesabı</label>
+                <select
+                  value={form.accountId ?? ''}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current, accountId: event.target.value,
+                    }))
+                  }
+                  style={{
+                    width: '100%', height: 46, padding: '0 12px',
+                    border: '1px solid #314a68', borderRadius: 11,
+                    color: '#fff', background: '#091727',
+                  }}
+                >
+                  <option value="">Hesap seçilmedi</option>
+                  {accounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.name}
+                      {account.status === 'connected' ? ' · Bağlı' : ' · Bağlı değil'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div
+                style={{
+                  gridColumn: '1 / -1',
+                  padding: 14,
+                  border: '1px solid #29415b',
+                  borderRadius: 13,
+                  background: '#0a192a',
+                }}
+              >
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  alignItems: 'center',
+                }}>
+                  <div>
+                    <strong>Mesaj Şablonu</strong>
+                    <p style={{ margin: '5px 0 0', color: '#7188a2', fontSize: 12 }}>
+                      Hazır bir mesaj seçin veya mesajı manuel yazın.
+                    </p>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {selectedTemplateId ? (
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={clearTemplateSelection}
+                        disabled={saving}
+                      >
+                        Seçimi Temizle
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => setTemplatePanelOpen((current) => !current)}
+                      disabled={saving}
+                    >
+                      {templatePanelOpen ? 'Şablonları Gizle' : 'Şablon Seç'}
+                    </button>
+                  </div>
+                </div>
+
+                {selectedTemplateId ? (
+                  <div style={{
+                    marginTop: 12,
+                    padding: '10px 12px',
+                    borderRadius: 10,
+                    color: '#8ee9d8',
+                    background: '#10283d',
+                  }}>
+                    Seçili şablon:{' '}
+                    <strong>
+                      {templates.find(
+                        (template) => template.id === selectedTemplateId,
+                      )?.name ?? 'Şablon'}
+                    </strong>
+                  </div>
+                ) : null}
+
+                {templatePanelOpen ? (
+                  <div style={{ marginTop: 14 }}>
+                    <div className="form-field">
+                      <label>Şablonlarda ara</label>
+                      <input
+                        type="search"
+                        value={templateSearch}
+                        onChange={(event) => setTemplateSearch(event.target.value)}
+                        placeholder="Şablon adı, kategori veya mesaj"
+                      />
+                    </div>
+
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                      gap: 10,
+                      maxHeight: 280,
+                      overflowY: 'auto',
+                      marginTop: 12,
+                    }}>
+                      {filteredTemplates.length === 0 ? (
+                        <div style={{
+                          gridColumn: '1 / -1',
+                          padding: 18,
+                          textAlign: 'center',
+                          color: '#7188a2',
+                        }}>
+                          Uygun mesaj şablonu bulunamadı.
+                        </div>
+                      ) : (
+                        filteredTemplates.map((template) => (
+                          <button
+                            key={template.id}
+                            type="button"
+                            onClick={() => applyTemplate(template)}
+                            style={{
+                              padding: 12,
+                              border: selectedTemplateId === template.id
+                                ? '1px solid #49cdb8'
+                                : '1px solid #29415b',
+                              borderRadius: 11,
+                              textAlign: 'left',
+                              color: '#dfeaf5',
+                              background: selectedTemplateId === template.id
+                                ? '#10323a'
+                                : '#091727',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <strong style={{ display: 'block', marginBottom: 5 }}>
+                              {template.name}
+                            </strong>
+                            <span style={{
+                              display: 'block',
+                              marginBottom: 8,
+                              color: '#7f98b4',
+                              fontSize: 12,
+                            }}>
+                              {template.category || 'Kategorisiz'}
+                            </span>
+                            <small style={{
+                              display: '-webkit-box',
+                              overflow: 'hidden',
+                              color: '#9fb2c7',
+                              WebkitBoxOrient: 'vertical',
+                              WebkitLineClamp: 3,
+                            }}>
+                              {template.content}
+                            </small>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+                <label>Kampanya açıklaması</label>
+                <input
+                  value={form.description ?? ''}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      description: event.target.value,
+                    }))
+                  }
+                  placeholder="Kampanyanın amacı veya ekip içi not"
+                />
+              </div>
+
+              <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+                <label>Mesaj</label>
+                <textarea
+                  value={form.message}
+                  onChange={(event) => {
+                    setSelectedTemplateId('');
+                    setForm((current) => ({
+                      ...current,
+                      message: event.target.value,
+                    }));
+                  }}
+                  rows={7}
+                  maxLength={4096}
+                  required
+                  style={{
+                    width: '100%', padding: 14,
+                    border: '1px solid #314a68', borderRadius: 11,
+                    resize: 'vertical', color: '#fff',
+                    background: '#091727', font: 'inherit',
+                  }}
+                />
+              </div>
+
+              {([
+                ['sectors', 'Sektörler', sectors],
+                ['cities', 'İller', cities],
+              ] as const).map(([field, label, values]) => (
+                <div key={field} style={{
+                  minHeight: 180, padding: 14,
+                  border: '1px solid #29415b',
+                  borderRadius: 13, background: '#0a192a',
+                }}>
+                  <strong>{label}</strong>
+                  <p style={{ color: '#7188a2', fontSize: 12 }}>
+                    Seçilmezse tümü hedeflenir.
+                  </p>
+                  <div style={{
+                    display: 'flex', maxHeight: 190,
+                    gap: 8, overflowY: 'auto', flexWrap: 'wrap',
+                  }}>
+                    {values.map((value) => {
+                      const selected = (form[field] ?? []).includes(value);
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          className={
+                            selected
+                              ? 'application-navigation__item application-navigation__item--active'
+                              : 'application-navigation__item'
+                          }
+                          style={{ width: 'auto', padding: '8px 10px' }}
+                          onClick={() => toggleValue(field, value)}
+                        >
+                          <strong>{value}</strong>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+
+              <section style={{
+                gridColumn: '1 / -1',
+                padding: 16,
+                border: '1px solid #29415b',
+                borderRadius: 13,
+                background: '#0a192a',
+              }}>
+                <strong>Gönderim Ayarları</strong>
+                <p style={{ color: '#7188a2', fontSize: 12 }}>
+                  Bu değerler kampanyayla birlikte kaydedilir.
+                </p>
+
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                  gap: 12,
+                  marginTop: 14,
+                }}>
+                  <div className="form-field">
+                    <label>Minimum bekleme (sn)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="3600"
+                      value={form.minDelaySeconds ?? 6}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          minDelaySeconds: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Maksimum bekleme (sn)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="3600"
+                      value={form.maxDelaySeconds ?? 14}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          maxDelaySeconds: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Günlük limit</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100000"
+                      value={form.dailyLimit ?? 0}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          dailyLimit: Number(event.target.value) || null,
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Her kaç mesajda mola</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="10000"
+                      value={form.batchSize ?? 30}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          batchSize: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Minimum mola (sn)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="86400"
+                      value={form.batchPauseMinSeconds ?? 45}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          batchPauseMinSeconds: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Maksimum mola (sn)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="86400"
+                      value={form.batchPauseMaxSeconds ?? 90}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          batchPauseMaxSeconds: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Çalışma başlangıcı</label>
+                    <input
+                      type="time"
+                      value={form.workStartTime ?? '09:00'}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          workStartTime: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Çalışma bitişi</label>
+                    <input
+                      type="time"
+                      value={form.workEndTime ?? '18:30'}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          workEndTime: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Retry sayısı</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="10"
+                      value={form.retryCount ?? 2}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          retryCount: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+                    <label>Planlanan tarih ve saat</label>
+                    <input
+                      type="datetime-local"
+                      value={form.scheduledAt ?? ''}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          scheduledAt: event.target.value || null,
+                          status: event.target.value
+                            ? 'scheduled'
+                            : current.status === 'scheduled'
+                              ? 'draft'
+                              : current.status,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <label style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  marginTop: 14,
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={form.typingSimulation !== false}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        typingSimulation: event.target.checked,
+                      }))
+                    }
+                  />
+                  Yazıyor simülasyonu etkin
+                </label>
+              </section>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <input
+                  type="checkbox"
+                  checked={form.onlyAllowed !== false}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current, onlyAllowed: event.target.checked,
+                    }))
+                  }
+                />
+                Yalnızca izinli CRM kişileri
+              </label>
+
+              <div className="account-count" style={{ justifySelf: 'end' }}>
+                <span>Tahmini alıcı</span>
+                <strong>{estimate}</strong>
+              </div>
+
+              {audienceAnalysis ? (
+                <section style={{
+                  gridColumn: '1 / -1',
+                  padding: 16,
+                  border: '1px solid #29415b',
+                  borderRadius: 13,
+                  background: '#081726',
+                }}>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    alignItems: 'flex-start',
+                  }}>
+                    <div>
+                      <strong>Hedef Kitle Analizi</strong>
+                      <p style={{
+                        margin: '5px 0 0',
+                        color: '#7188a2',
+                        fontSize: 12,
+                      }}>
+                        Gönderim başlamadan önce CRM kitlesini kontrol edin.
+                      </p>
+                    </div>
+                    {audienceAnalysis.estimatedDays > 0 ? (
+                      <span className="status-badge" style={{ color: '#f3d576' }}>
+                        Yaklaşık {audienceAnalysis.estimatedDays} gün
+                      </span>
+                    ) : null}
+                  </div>
+
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns:
+                      'repeat(auto-fit, minmax(130px, 1fr))',
+                    gap: 10,
+                    marginTop: 14,
+                  }}>
+                    {[
+                      ['Toplam CRM', audienceAnalysis.totalCrm],
+                      ['Filtre Sonrası', audienceAnalysis.filtered],
+                      ['İzinli', audienceAnalysis.allowed],
+                      ['Telefon Uygun', audienceAnalysis.validPhone],
+                      ['Gönderilecek', audienceAnalysis.sendable],
+                    ].map(([label, value]) => (
+                      <div
+                        key={String(label)}
+                        style={{
+                          padding: 12,
+                          border: '1px solid #243c55',
+                          borderRadius: 11,
+                          background: '#0a1c2e',
+                        }}
+                      >
+                        <span style={{
+                          display: 'block',
+                          color: '#7890aa',
+                          fontSize: 12,
+                        }}>
+                          {label}
+                        </span>
+                        <strong style={{
+                          display: 'block',
+                          marginTop: 5,
+                          fontSize: 22,
+                        }}>
+                          {value}
+                        </strong>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 10,
+                    marginTop: 12,
+                    color: '#8ca1b8',
+                    fontSize: 12,
+                  }}>
+                    <span>
+                      İzin nedeniyle çıkarılan:{' '}
+                      <strong>{audienceAnalysis.excludedByPermission}</strong>
+                    </span>
+                    <span>
+                      Telefon nedeniyle çıkarılan:{' '}
+                      <strong>{audienceAnalysis.excludedByPhone}</strong>
+                    </span>
+                    {audienceAnalysis.estimatedCompletionAt ? (
+                      <span>
+                        Tahmini bitiş:{' '}
+                        <strong>
+                          {new Date(
+                            audienceAnalysis.estimatedCompletionAt,
+                          ).toLocaleDateString('tr-TR')}
+                        </strong>
+                      </span>
+                    ) : null}
+                  </div>
+                </section>
+              ) : null}
+            </div>
+
+            <footer className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setFormOpen(false)}
+              >
+                Vazgeç
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() =>
+                  setForm((current) => ({ ...current, status: 'draft' }))
+                }
+              >
+                Taslak
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={!form.accountId}
+                onClick={() =>
+                  setForm((current) => ({ ...current, status: 'ready' }))
+                }
+              >
+                Hazır
+              </button>
+              <button type="submit" className="primary-button" disabled={saving}>
+                {saving ? 'Kaydediliyor...' : 'Kaydet'}
+              </button>
+            </footer>
+          </form>
+        </div>
+      ) : null}
+
+      {logCampaign ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="connection-modal"
+            style={{ width: 'min(980px, 100%)' }}
+          >
+            <header className="modal-header">
+              <div>
+                <span className="eyebrow">GÖNDERİM SONUÇLARI</span>
+                <h2>{logCampaign.name}</h2>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setLogCampaign(null)}
+              >
+                ×
+              </button>
+            </header>
+
+            <div style={{ maxHeight: 520, overflow: 'auto', marginTop: 18 }}>
+              <table style={{
+                width: '100%', minWidth: 760, borderCollapse: 'collapse',
+              }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', color: '#8ea2bb' }}>
+                    {['Kişi', 'Telefon', 'Durum', 'Deneme', 'Hata'].map(
+                      (label) => (
+                        <th key={label} style={{
+                          padding: 10, borderBottom: '1px solid #2a415d',
+                        }}>
+                          {label}
+                        </th>
+                      ),
+                    )}
+                  </tr>
+                </thead>
+                <tbody>
+                  {logs?.recipients.map((recipient) => (
+                    <tr key={recipient.id}>
+                      <td style={{ padding: 10, borderBottom: '1px solid #1d3349' }}>
+                        {recipient.fullName}
+                      </td>
+                      <td style={{ padding: 10, borderBottom: '1px solid #1d3349' }}>
+                        {recipient.phoneNumber}
+                      </td>
+                      <td style={{ padding: 10, borderBottom: '1px solid #1d3349' }}>
+                        {recipient.status}
+                      </td>
+                      <td style={{ padding: 10, borderBottom: '1px solid #1d3349' }}>
+                        {recipient.attemptCount}
+                      </td>
+                      <td style={{
+                        maxWidth: 360, padding: 10,
+                        borderBottom: '1px solid #1d3349',
+                        color: '#ffacbb',
+                      }}>
+                        {recipient.errorMessage || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {logs && logs.total === 0 ? (
+                <div className="empty-state">
+                  <strong>Henüz gönderim sonucu yok</strong>
+                </div>
+              ) : null}
+            </div>
+
+            <footer className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setLogCampaign(null)}
+              >
+                Kapat
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+    </section>
+  );
+}

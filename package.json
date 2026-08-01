@@ -1,0 +1,63 @@
+{
+  "name": "ai-operasyon-whatsapp-crm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Baileys tabanlı yerel WhatsApp CRM ve kampanya uygulaması",
+  "type": "module",
+  "main": "dist/src/main/main.js",
+  "scripts": {
+    "dev:renderer": "vite",
+    "dev:main": "tsc -p tsconfig.main.json --watch",
+    "dev:electron": "wait-on http://127.0.0.1:5173 dist/src/main/main.js && cross-env NODE_ENV=development electron .",
+    "dev": "concurrently -k -n RENDERER,MAIN,ELECTRON \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:electron\"",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build": "npm run typecheck && npm run build:renderer && npm run build:main",
+    "start": "electron .",
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "dist": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "better-sqlite3": "latest",
+    "pino": "latest",
+    "qrcode": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-router-dom": "latest",
+    "uuid": "latest",
+    "xlsx": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "latest",
+    "@types/better-sqlite3": "latest",
+    "@types/node": "latest",
+    "@types/qrcode": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "cross-env": "latest",
+    "electron": "latest",
+    "electron-builder": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "wait-on": "latest"
+  },
+  "build": {
+    "appId": "com.aioperasyon.whatsappcrm",
+    "productName": "AI Operasyon WhatsApp CRM",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

@@ -1,0 +1,704 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from 'react';
+import type {
+  Campaign,
+  CampaignAudienceEstimate,
+  CampaignAudienceRequest,
+  CampaignDeleteRequest,
+  CampaignDeleteResult,
+  CampaignListRequest,
+  CampaignSaveInput,
+  CampaignSnapshot,
+  CampaignStatus,
+} from '../../../shared/interfaces/campaign';
+import type { WhatsAppAccount } from '../../../shared/interfaces/whatsapp-account';
+
+type CampaignApi = typeof window.desktopAPI & {
+  listCampaigns(
+    request: CampaignListRequest,
+  ): Promise<CampaignSnapshot>;
+  saveCampaign(input: CampaignSaveInput): Promise<Campaign>;
+  deleteCampaign(
+    request: CampaignDeleteRequest,
+  ): Promise<CampaignDeleteResult>;
+  estimateCampaignAudience(
+    request: CampaignAudienceRequest,
+  ): Promise<CampaignAudienceEstimate>;
+  getCampaignAudienceOptions(): Promise<{
+    sectors: string[];
+    cities: string[];
+  }>;
+};
+
+const EMPTY_FORM: CampaignSaveInput = {
+  name: '',
+  accountId: '',
+  message: '',
+  sectors: [],
+  cities: [],
+  onlyAllowed: true,
+  status: 'draft',
+};
+
+function readError(reason: unknown): string {
+  return reason instanceof Error
+    ? reason.message
+    : 'Beklenmeyen bir kampanya hatası oluştu.';
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat('tr-TR', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date);
+}
+
+function statusLabel(status: CampaignStatus): string {
+  return status === 'ready' ? 'Hazır' : 'Taslak';
+}
+
+export function CampaignPage() {
+  const api = window.desktopAPI as CampaignApi;
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [accounts, setAccounts] = useState<WhatsAppAccount[]>([]);
+  const [sectors, setSectors] = useState<string[]>([]);
+  const [cities, setCities] = useState<string[]>([]);
+  const [total, setTotal] = useState(0);
+  const [search, setSearch] = useState('');
+  const [form, setForm] = useState<CampaignSaveInput>(EMPTY_FORM);
+  const [formOpen, setFormOpen] = useState(false);
+  const [estimate, setEstimate] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [estimating, setEstimating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const connectedAccounts = useMemo(
+    () => accounts.filter((account) => account.status === 'connected'),
+    [accounts],
+  );
+
+  const loadCampaigns = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const result = await api.listCampaigns({
+        search,
+        limit: 100,
+        offset: 0,
+      });
+      setCampaigns(result.campaigns);
+      setTotal(result.total);
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, [api, search]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadCampaigns();
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [loadCampaigns]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadFoundation = async (): Promise<void> => {
+      try {
+        const [nextAccounts, options] = await Promise.all([
+          window.desktopAPI.listWhatsAppAccounts(),
+          api.getCampaignAudienceOptions(),
+        ]);
+
+        if (!cancelled) {
+          setAccounts(nextAccounts);
+          setSectors(options.sectors);
+          setCities(options.cities);
+        }
+      } catch (reason: unknown) {
+        if (!cancelled) {
+          setError(readError(reason));
+        }
+      }
+    };
+
+    void loadFoundation();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    if (!formOpen) return;
+
+    let cancelled = false;
+
+    const timer = window.setTimeout(async () => {
+      setEstimating(true);
+
+      try {
+        const result = await api.estimateCampaignAudience({
+          sectors: form.sectors,
+          cities: form.cities,
+          onlyAllowed: form.onlyAllowed,
+        });
+
+        if (!cancelled) {
+          setEstimate(result.total);
+        }
+      } catch (reason: unknown) {
+        if (!cancelled) {
+          setError(readError(reason));
+        }
+      } finally {
+        if (!cancelled) {
+          setEstimating(false);
+        }
+      }
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    api,
+    form.cities,
+    form.onlyAllowed,
+    form.sectors,
+    formOpen,
+  ]);
+
+  const openNew = (): void => {
+    setForm({
+      ...EMPTY_FORM,
+      accountId: connectedAccounts[0]?.id ?? accounts[0]?.id ?? '',
+    });
+    setEstimate(0);
+    setError(null);
+    setNotice(null);
+    setFormOpen(true);
+  };
+
+  const openEdit = (campaign: Campaign): void => {
+    setForm({
+      id: campaign.id,
+      name: campaign.name,
+      accountId: campaign.accountId ?? '',
+      message: campaign.message,
+      sectors: campaign.sectors,
+      cities: campaign.cities,
+      onlyAllowed: campaign.onlyAllowed,
+      status: campaign.status,
+    });
+    setEstimate(campaign.estimatedRecipients);
+    setError(null);
+    setNotice(null);
+    setFormOpen(true);
+  };
+
+  const toggleValue = (
+    field: 'sectors' | 'cities',
+    value: string,
+  ): void => {
+    setForm((current) => {
+      const values = current[field] ?? [];
+      const nextValues = values.includes(value)
+        ? values.filter((item) => item !== value)
+        : [...values, value];
+
+      return {
+        ...current,
+        [field]: nextValues,
+      };
+    });
+  };
+
+  const save = async (
+    event: FormEvent<HTMLFormElement>,
+  ): Promise<void> => {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const saved = await api.saveCampaign(form);
+      setFormOpen(false);
+      setForm(EMPTY_FORM);
+      setNotice(
+        `“${saved.name}” kampanyası ${statusLabel(
+          saved.status,
+        ).toLocaleLowerCase('tr-TR')} olarak kaydedildi.`,
+      );
+      await loadCampaigns();
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (campaign: Campaign): Promise<void> => {
+    const confirmed = window.confirm(
+      `“${campaign.name}” kampanyası kalıcı olarak silinsin mi?`,
+    );
+
+    if (!confirmed) return;
+
+    setError(null);
+    setNotice(null);
+
+    try {
+      await api.deleteCampaign({ id: campaign.id });
+      setNotice('Kampanya silindi.');
+      await loadCampaigns();
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    }
+  };
+
+  return (
+    <section className="accounts-page">
+      <div className="page-card" style={{ width: 'min(1380px, 100%)' }}>
+        <header className="page-header">
+          <div>
+            <span className="eyebrow">TOPLU İLETİŞİM</span>
+            <h1>Kampanyalar</h1>
+            <p>
+              CRM hedef kitlesini seçin, mesajınızı hazırlayın ve
+              kampanyayı gönderim kuyruğu için taslak olarak kaydedin.
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <div className="account-count">
+              <span>Toplam kampanya</span>
+              <strong>{total}</strong>
+            </div>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={openNew}
+            >
+              Yeni Kampanya
+            </button>
+          </div>
+        </header>
+
+        {error ? <div className="error-message">{error}</div> : null}
+        {notice ? (
+          <div
+            style={{
+              marginBottom: 14,
+              padding: '12px 14px',
+              border: '1px solid #255f59',
+              borderRadius: 12,
+              color: '#87ead9',
+              background: '#0b292b',
+            }}
+          >
+            {notice}
+          </div>
+        ) : null}
+
+        <section className="panel">
+          <div className="form-field" style={{ marginBottom: 18 }}>
+            <label htmlFor="campaign-search">Kampanyalarda ara</label>
+            <input
+              id="campaign-search"
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Kampanya adı veya mesaj"
+            />
+          </div>
+
+          {loading ? (
+            <div className="empty-state">
+              <strong>Kampanyalar yükleniyor...</strong>
+            </div>
+          ) : campaigns.length === 0 ? (
+            <div className="empty-state">
+              <strong>Henüz kampanya yok</strong>
+              <span>
+                İlk kampanya taslağınızı oluşturarak başlayın.
+              </span>
+            </div>
+          ) : (
+            <div className="account-list">
+              {campaigns.map((campaign) => (
+                <article className="account-card" key={campaign.id}>
+                  <div className="account-card-main">
+                    <span className="account-icon">K</span>
+                    <div className="account-details">
+                      <strong>{campaign.name}</strong>
+                      <span>
+                        {campaign.accountName || 'Gönderen hesap seçilmedi'}
+                        {' · '}
+                        {campaign.estimatedRecipients} tahmini alıcı
+                      </span>
+                      <small>
+                        {campaign.sectors.length > 0
+                          ? campaign.sectors.join(', ')
+                          : 'Tüm sektörler'}
+                        {' · '}
+                        {campaign.cities.length > 0
+                          ? campaign.cities.join(', ')
+                          : 'Tüm iller'}
+                        {' · '}
+                        Güncellendi: {formatDate(campaign.updatedAt)}
+                      </small>
+                    </div>
+                  </div>
+
+                  <div className="account-actions">
+                    <span
+                      className="status-badge"
+                      style={{
+                        color:
+                          campaign.status === 'ready'
+                            ? '#71efd8'
+                            : '#f3d576',
+                      }}
+                    >
+                      {statusLabel(campaign.status)}
+                    </span>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => openEdit(campaign)}
+                    >
+                      Düzenle
+                    </button>
+                    <button
+                      type="button"
+                      className="danger-button"
+                      onClick={() => void remove(campaign)}
+                    >
+                      Sil
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
+
+      {formOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !saving) {
+              setFormOpen(false);
+            }
+          }}
+        >
+          <form
+            className="connection-modal"
+            style={{ width: 'min(980px, 100%)' }}
+            onSubmit={save}
+          >
+            <header className="modal-header">
+              <div>
+                <span className="eyebrow">KAMPANYA TASLAĞI</span>
+                <h2>
+                  {form.id ? 'Kampanyayı Düzenle' : 'Yeni Kampanya'}
+                </h2>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setFormOpen(false)}
+                disabled={saving}
+                aria-label="Pencereyi kapat"
+              >
+                ×
+              </button>
+            </header>
+
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: 16,
+                marginTop: 22,
+              }}
+            >
+              <div className="form-field">
+                <label htmlFor="campaign-name">Kampanya adı</label>
+                <input
+                  id="campaign-name"
+                  value={form.name}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
+                  }
+                  maxLength={120}
+                  required
+                  disabled={saving}
+                  placeholder="Örn. Ağustos Randevu Kampanyası"
+                />
+              </div>
+
+              <div className="form-field">
+                <label htmlFor="campaign-account">
+                  Gönderen WhatsApp hesabı
+                </label>
+                <select
+                  id="campaign-account"
+                  value={form.accountId ?? ''}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      accountId: event.target.value,
+                    }))
+                  }
+                  disabled={saving}
+                  style={{
+                    width: '100%',
+                    height: 46,
+                    padding: '0 12px',
+                    border: '1px solid #314a68',
+                    borderRadius: 11,
+                    color: '#fff',
+                    background: '#091727',
+                  }}
+                >
+                  <option value="">Hesap seçilmedi</option>
+                  {accounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.name}
+                      {account.phoneNumber
+                        ? ` · ${account.phoneNumber}`
+                        : ''}
+                      {account.status === 'connected'
+                        ? ' · Bağlı'
+                        : ' · Bağlı değil'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div
+                className="form-field"
+                style={{ gridColumn: '1 / -1' }}
+              >
+                <label htmlFor="campaign-message">Mesaj</label>
+                <textarea
+                  id="campaign-message"
+                  value={form.message}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      message: event.target.value,
+                    }))
+                  }
+                  rows={7}
+                  maxLength={4096}
+                  required
+                  disabled={saving}
+                  placeholder="Kampanya mesajını yazın..."
+                  style={{
+                    width: '100%',
+                    padding: 14,
+                    border: '1px solid #314a68',
+                    borderRadius: 11,
+                    resize: 'vertical',
+                    outline: 'none',
+                    color: '#fff',
+                    background: '#091727',
+                    font: 'inherit',
+                  }}
+                />
+                <small
+                  style={{
+                    display: 'block',
+                    marginTop: 6,
+                    textAlign: 'right',
+                    color: '#7188a2',
+                  }}
+                >
+                  {(form.message ?? '').length} / 4096
+                </small>
+              </div>
+
+              {[
+                ['sectors', 'Sektörler', sectors],
+                ['cities', 'İller', cities],
+              ].map(([field, label, values]) => (
+                <div
+                  key={String(field)}
+                  style={{
+                    minHeight: 180,
+                    padding: 14,
+                    border: '1px solid #29415b',
+                    borderRadius: 13,
+                    background: '#0a192a',
+                  }}
+                >
+                  <strong>{String(label)}</strong>
+                  <p
+                    style={{
+                      margin: '5px 0 12px',
+                      color: '#7188a2',
+                      fontSize: 12,
+                    }}
+                  >
+                    Seçim yapılmazsa tümü hedeflenir.
+                  </p>
+                  <div
+                    style={{
+                      display: 'flex',
+                      maxHeight: 190,
+                      gap: 8,
+                      overflowY: 'auto',
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    {(values as string[]).length === 0 ? (
+                      <span style={{ color: '#7188a2' }}>
+                        CRM’de seçenek bulunamadı.
+                      </span>
+                    ) : (
+                      (values as string[]).map((value) => {
+                        const selected = (
+                          form[field as 'sectors' | 'cities'] ?? []
+                        ).includes(value);
+
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            className={
+                              selected
+                                ? 'application-navigation__item application-navigation__item--active'
+                                : 'application-navigation__item'
+                            }
+                            style={{
+                              width: 'auto',
+                              padding: '8px 10px',
+                            }}
+                            onClick={() =>
+                              toggleValue(
+                                field as 'sectors' | 'cities',
+                                value,
+                              )
+                            }
+                            disabled={saving}
+                          >
+                            <strong>{value}</strong>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  color: '#c7d5e5',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={form.onlyAllowed !== false}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      onlyAllowed: event.target.checked,
+                    }))
+                  }
+                  disabled={saving}
+                />
+                Yalnızca izinli CRM kişilerini hedefle
+              </label>
+
+              <div
+                className="account-count"
+                style={{ justifySelf: 'end', minWidth: 220 }}
+              >
+                <span>Tahmini alıcı</span>
+                <strong>{estimating ? '…' : estimate}</strong>
+              </div>
+            </div>
+
+            <footer className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setFormOpen(false)}
+                disabled={saving}
+              >
+                Vazgeç
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={saving}
+                onClick={() =>
+                  setForm((current) => ({
+                    ...current,
+                    status: 'draft',
+                  }))
+                }
+              >
+                Taslak
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={saving || !form.accountId}
+                onClick={() =>
+                  setForm((current) => ({
+                    ...current,
+                    status: 'ready',
+                  }))
+                }
+              >
+                Hazır Olarak İşaretle
+              </button>
+              <button
+                type="submit"
+                className="primary-button"
+                disabled={saving}
+              >
+                {saving
+                  ? 'Kaydediliyor...'
+                  : form.status === 'ready'
+                    ? 'Hazır Kaydet'
+                    : 'Taslak Kaydet'}
+              </button>
+            </footer>
+          </form>
+        </div>
+      ) : null}
+    </section>
+  );
+}

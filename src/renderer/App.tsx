@@ -1,0 +1,1516 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from 'react';
+import type {
+  CrmContact,
+  CrmContactListRequest,
+  CrmContactSaveInput,
+  CrmContactSnapshot,
+  CrmImportApplyRequest,
+  CrmImportPreview,
+  CrmImportResult,
+  CrmBulkActionResult,
+  CrmBulkDeleteRequest,
+  CrmBulkPermissionRequest,
+  CrmExportRequest,
+  CrmExportResult,
+  CrmPermissionStatus,
+} from '../../shared/interfaces/crm';
+import { InboxWorkspacePage } from './pages/InboxWorkspacePage';
+import { WhatsAppAccountsPage } from './pages/WhatsAppAccountsPage';
+import { MessageTemplatesPage } from './pages/MessageTemplatesPage';
+import { CampaignPage } from './pages/CampaignPage';
+
+type AppPage = 'accounts' | 'inbox' | 'crm' | 'campaigns' | 'templates';
+
+type CrmDesktopAPI = typeof window.desktopAPI & {
+  listCrmContacts(
+    request: CrmContactListRequest,
+  ): Promise<CrmContactSnapshot>;
+  saveCrmContact(
+    input: CrmContactSaveInput,
+  ): Promise<CrmContact>;
+  deleteCrmContact(
+    request: { id: string },
+  ): Promise<{ deleted: boolean }>;
+  previewCrmImport(): Promise<CrmImportPreview | null>;
+  applyCrmImport(
+    request: CrmImportApplyRequest,
+  ): Promise<CrmImportResult>;
+  bulkUpdateCrmPermission(
+    request: CrmBulkPermissionRequest,
+  ): Promise<CrmBulkActionResult>;
+  bulkDeleteCrmContacts(
+    request: CrmBulkDeleteRequest,
+  ): Promise<CrmBulkActionResult>;
+  exportCrmContacts(
+    request: CrmExportRequest,
+  ): Promise<CrmExportResult>;
+};
+
+const EMPTY_FORM: CrmContactSaveInput = {
+  fullName: '',
+  companyName: '',
+  sector: '',
+  city: '',
+  phoneNumber: '',
+  permissionStatus: 'allowed',
+  notes: '',
+};
+
+function readError(reason: unknown): string {
+  if (reason instanceof Error) {
+    return reason.message;
+  }
+
+  return 'Beklenmeyen bir işlem hatası oluştu.';
+}
+
+function CrmPage() {
+  const [crmWhatsAppAccounts, setCrmWhatsAppAccounts] = useState<
+    Array<{
+      id: string;
+      name: string;
+      phoneNumber?: string | null;
+      status: string;
+    }>
+  >([]);
+  const [crmMessageContact, setCrmMessageContact] =
+    useState<CrmContact | null>(null);
+  const [crmMessageAccountId, setCrmMessageAccountId] = useState('');
+  const [crmMessageText, setCrmMessageText] = useState('');
+  const [crmMessageSending, setCrmMessageSending] = useState(false);
+  const [crmMessageSuccess, setCrmMessageSuccess] =
+    useState<string | null>(null);
+
+  const api = window.desktopAPI as CrmDesktopAPI;
+  const [contacts, setContacts] = useState<CrmContact[]>([]);
+  const [total, setTotal] = useState(0);
+  const [search, setSearch] = useState('');
+  const [permissionStatus, setPermissionStatus] =
+    useState<CrmPermissionStatus | 'all'>('all');
+  const [pageSize, setPageSize] = useState(20);
+  const [page, setPage] = useState(1);
+  const [form, setForm] =
+    useState<CrmContactSaveInput>(EMPTY_FORM);
+  const [formOpen, setFormOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importPreview, setImportPreview] =
+    useState<CrmImportPreview | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importApplying, setImportApplying] = useState(false);
+  const [importResult, setImportResult] =
+    useState<CrmImportResult | null>(null);
+  const [selectedIds, setSelectedIds] =
+    useState<Set<string>>(new Set());
+  const [bulkWorking, setBulkWorking] = useState(false);
+  const [exportWorking, setExportWorking] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadCrmWhatsAppAccounts = async (): Promise<void> => {
+      try {
+        const accounts =
+          await window.desktopAPI.listWhatsAppAccounts();
+
+        if (!cancelled) {
+          setCrmWhatsAppAccounts(accounts);
+        }
+      } catch (reason: unknown) {
+        if (!cancelled) {
+          setError(readError(reason));
+        }
+      }
+    };
+
+    void loadCrmWhatsAppAccounts();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const loadContacts = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const result = await api.listCrmContacts({
+        search,
+        permissionStatus,
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+      });
+
+      setContacts(result.contacts);
+      setTotal(result.total);
+      setSelectedIds((current) => {
+        const visibleIds = new Set(
+          result.contacts.map((contact) => contact.id),
+        );
+        return new Set(
+          Array.from(current).filter((id) => visibleIds.has(id)),
+        );
+      });
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, [api, page, pageSize, permissionStatus, search]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadContacts();
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [loadContacts]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, permissionStatus, pageSize]);
+
+  useEffect(() => {
+    if (page > totalPages) {
+      setPage(totalPages);
+    }
+  }, [page, totalPages]);
+
+  const visibleRange = useMemo(() => {
+    if (total === 0) return '0 kayıt';
+
+    const start = (page - 1) * pageSize + 1;
+    const end = Math.min(page * pageSize, total);
+    return `${start}-${end} / ${total}`;
+  }, [page, pageSize, total]);
+
+  const allVisibleSelected =
+    contacts.length > 0 &&
+    contacts.every((contact) => selectedIds.has(contact.id));
+
+  const toggleSelectAll = (): void => {
+    setSelectedIds(
+      allVisibleSelected
+        ? new Set()
+        : new Set(contacts.map((contact) => contact.id)),
+    );
+  };
+
+  const toggleSelection = (id: string): void => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+
+      return next;
+    });
+  };
+
+  const runBulkPermission = async (
+    nextStatus: CrmPermissionStatus,
+  ): Promise<void> => {
+    const ids = Array.from(selectedIds);
+
+    if (ids.length === 0) return;
+
+    setBulkWorking(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const result = await api.bulkUpdateCrmPermission({
+        ids,
+        permissionStatus: nextStatus,
+      });
+      setSelectedIds(new Set());
+      setNotice(
+        `${result.affected} kişinin izin durumu güncellendi.`,
+      );
+      await loadContacts();
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setBulkWorking(false);
+    }
+  };
+
+  const runBulkDelete = async (): Promise<void> => {
+    const ids = Array.from(selectedIds);
+
+    if (ids.length === 0) return;
+
+    const confirmed = window.confirm(
+      `${ids.length} CRM kaydı kalıcı olarak silinsin mi?`,
+    );
+
+    if (!confirmed) return;
+
+    setBulkWorking(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const result = await api.bulkDeleteCrmContacts({ ids });
+      setSelectedIds(new Set());
+      setNotice(`${result.affected} CRM kaydı silindi.`);
+      await loadContacts();
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setBulkWorking(false);
+    }
+  };
+
+  const exportContacts = async (
+    format: 'xlsx' | 'csv',
+  ): Promise<void> => {
+    setExportWorking(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const result = await api.exportCrmContacts({
+        search,
+        permissionStatus,
+        format,
+      });
+
+      if (result.filePath) {
+        setNotice(
+          `${result.exported} CRM kaydı ${format.toUpperCase()} olarak dışa aktarıldı.`,
+        );
+      }
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setExportWorking(false);
+    }
+  };
+
+
+  const connectedCrmWhatsAppAccounts =
+    crmWhatsAppAccounts.filter(
+      (account) => account.status === 'connected',
+    );
+
+  const openCrmMessageModal = (contact: CrmContact): void => {
+    setCrmMessageContact(contact);
+    setCrmMessageText('');
+    setCrmMessageSuccess(null);
+    setError(null);
+
+    const selectedIsConnected =
+      connectedCrmWhatsAppAccounts.some(
+        (account) => account.id === crmMessageAccountId,
+      );
+
+    if (!selectedIsConnected) {
+      setCrmMessageAccountId(
+        connectedCrmWhatsAppAccounts[0]?.id ?? '',
+      );
+    }
+  };
+
+  const closeCrmMessageModal = (): void => {
+    if (crmMessageSending) return;
+
+    setCrmMessageContact(null);
+    setCrmMessageText('');
+    setCrmMessageSuccess(null);
+  };
+
+  const sendCrmWhatsAppMessage = async (): Promise<void> => {
+    if (!crmMessageContact) return;
+
+    const text = crmMessageText.trim();
+
+    if (!crmMessageAccountId) {
+      setError(
+        'Mesaj göndermek için bağlı bir WhatsApp hesabı seçin.',
+      );
+      return;
+    }
+
+    if (!text) {
+      setError('Gönderilecek mesajı yazın.');
+      return;
+    }
+
+    setCrmMessageSending(true);
+    setCrmMessageSuccess(null);
+    setError(null);
+
+    try {
+      const desktopApi = window.desktopAPI as typeof window.desktopAPI & {
+        startInboxConversation(request: {
+          accountId: string;
+          phoneNumber: string;
+          text: string;
+        }): Promise<unknown>;
+      };
+
+      await desktopApi.startInboxConversation({
+        accountId: crmMessageAccountId,
+        phoneNumber: crmMessageContact.phoneNumber,
+        text,
+      });
+
+      setCrmMessageSuccess(
+        'Mesaj WhatsApp üzerinden gönderildi.',
+      );
+      setCrmMessageText('');
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setCrmMessageSending(false);
+    }
+  };
+
+  const chooseImportFile = async (): Promise<void> => {
+    setImportLoading(true);
+    setImportResult(null);
+    setError(null);
+
+    try {
+      const preview = await api.previewCrmImport();
+
+      if (!preview) {
+        return;
+      }
+
+      setImportPreview(preview);
+      setImportOpen(true);
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const applyImport = async (): Promise<void> => {
+    if (!importPreview) return;
+
+    setImportApplying(true);
+    setError(null);
+
+    try {
+      const result = await api.applyCrmImport({
+        sessionId: importPreview.sessionId,
+      });
+      setImportResult(result);
+      setImportPreview(null);
+      setPage(1);
+      await loadContacts();
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setImportApplying(false);
+    }
+  };
+
+  const openNew = (): void => {
+    setForm(EMPTY_FORM);
+    setFormOpen(true);
+    setError(null);
+  };
+
+  const openEdit = (contact: CrmContact): void => {
+    setForm({
+      id: contact.id,
+      fullName: contact.fullName,
+      companyName: contact.companyName ?? '',
+      sector: contact.sector ?? '',
+      city: contact.city ?? '',
+      phoneNumber: contact.phoneNumber,
+      permissionStatus: contact.permissionStatus,
+      notes: contact.notes ?? '',
+    });
+    setFormOpen(true);
+    setError(null);
+  };
+
+  const saveContact = async (
+    event: FormEvent<HTMLFormElement>,
+  ): Promise<void> => {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+
+    try {
+      await api.saveCrmContact(form);
+      setFormOpen(false);
+      setForm(EMPTY_FORM);
+      await loadContacts();
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteContact = async (
+    contact: CrmContact,
+  ): Promise<void> => {
+    const confirmed = window.confirm(
+      `“${contact.fullName}” CRM kaydı silinsin mi?`,
+    );
+
+    if (!confirmed) return;
+
+    try {
+      await api.deleteCrmContact({ id: contact.id });
+      await loadContacts();
+    } catch (reason: unknown) {
+      setError(readError(reason));
+    }
+  };
+
+  return (
+    <section className="accounts-page">
+      <div className="page-card" style={{ width: 'min(1380px, 100%)' }}>
+        <header className="page-header">
+          <div>
+            <span className="eyebrow">MÜŞTERİ YÖNETİMİ</span>
+            <h1>CRM</h1>
+            <p>
+              Kişileri, firmaları, sektörleri ve iletişim izinlerini
+              tek yerde yönetin.
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <div className="account-count">
+              <span>Toplam kişi</span>
+              <strong>{total}</strong>
+            </div>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void chooseImportFile()}
+              disabled={importLoading}
+            >
+              {importLoading ? 'Dosya Açılıyor...' : 'Excel / CSV İçe Aktar'}
+            </button>
+            <button type="button" className="primary-button" onClick={openNew}>
+              Kişi Ekle
+            </button>
+          </div>
+        </header>
+
+        {error ? <div className="error-message">{error}</div> : null}
+        {notice ? (
+          <div
+            style={{
+              marginBottom: 14,
+              padding: '12px 14px',
+              border: '1px solid #255f59',
+              borderRadius: 12,
+              color: '#87ead9',
+              background: '#0b292b',
+            }}
+          >
+            {notice}
+          </div>
+        ) : null}
+
+        <section className="panel">
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(260px, 1fr) 190px 130px',
+              gap: 12,
+              marginBottom: 18,
+            }}
+          >
+            <div className="form-field">
+              <label htmlFor="crm-search">Ara</label>
+              <input
+                id="crm-search"
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Ad, firma, sektör, il veya telefon"
+              />
+            </div>
+
+            <div className="form-field">
+              <label htmlFor="crm-permission">İzin durumu</label>
+              <select
+                id="crm-permission"
+                value={permissionStatus}
+                onChange={(event) =>
+                  setPermissionStatus(
+                    event.target.value as
+                      | CrmPermissionStatus
+                      | 'all',
+                  )
+                }
+                style={{
+                  width: '100%',
+                  height: 46,
+                  padding: '0 12px',
+                  border: '1px solid #314a68',
+                  borderRadius: 11,
+                  color: '#fff',
+                  background: '#091727',
+                }}
+              >
+                <option value="all">Tümü</option>
+                <option value="allowed">İzinli</option>
+                <option value="blocked">Engelli</option>
+              </select>
+            </div>
+
+            <div className="form-field">
+              <label htmlFor="crm-page-size">Sayfa boyutu</label>
+              <select
+                id="crm-page-size"
+                value={pageSize}
+                onChange={(event) =>
+                  setPageSize(Number(event.target.value))
+                }
+                style={{
+                  width: '100%',
+                  height: 46,
+                  padding: '0 12px',
+                  border: '1px solid #314a68',
+                  borderRadius: 11,
+                  color: '#fff',
+                  background: '#091727',
+                }}
+              >
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 12,
+              flexWrap: 'wrap',
+              marginBottom: 14,
+            }}
+          >
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void exportContacts('xlsx')}
+                disabled={exportWorking || total === 0}
+              >
+                Excel Dışa Aktar
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void exportContacts('csv')}
+                disabled={exportWorking || total === 0}
+              >
+                CSV Dışa Aktar
+              </button>
+            </div>
+
+            {selectedIds.size > 0 ? (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <span
+                  style={{
+                    display: 'grid',
+                    placeItems: 'center',
+                    padding: '0 8px',
+                    color: '#9eb1c8',
+                  }}
+                >
+                  {selectedIds.size} kişi seçildi
+                </span>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => void runBulkPermission('allowed')}
+                  disabled={bulkWorking}
+                >
+                  İzin Ver
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => void runBulkPermission('blocked')}
+                  disabled={bulkWorking}
+                >
+                  Engelle
+                </button>
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={() => void runBulkDelete()}
+                  disabled={bulkWorking}
+                >
+                  Seçilenleri Sil
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          <div style={{ overflowX: 'auto' }}>
+            <table
+              style={{
+                width: '100%',
+                minWidth: 980,
+                borderCollapse: 'collapse',
+              }}
+            >
+              <thead>
+                <tr style={{ color: '#8ea2bb', textAlign: 'left' }}>
+                  <th
+                    style={{
+                      width: 44,
+                      padding: '12px 10px',
+                      borderBottom: '1px solid #2a415d',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleSelectAll}
+                      aria-label="Görünen kişilerin tümünü seç"
+                    />
+                  </th>
+                  {[
+                    'Ad Soyad',
+                    'Firma',
+                    'Sektör',
+                    'İl',
+                    'Telefon',
+                    'İzin',
+                    'İşlemler',
+                  ].map((label) => (
+                    <th
+                      key={label}
+                      style={{
+                        padding: '12px 10px',
+                        borderBottom: '1px solid #2a415d',
+                        fontSize: 12,
+                      }}
+                    >
+                      {label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {contacts.map((contact) => (
+                  <tr key={contact.id}>
+                    <td
+                      style={{
+                        width: 44,
+                        padding: '14px 10px',
+                        borderBottom: '1px solid #1d3349',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(contact.id)}
+                        onChange={() => toggleSelection(contact.id)}
+                        aria-label={`${contact.fullName} kişisini seç`}
+                      />
+                    </td>
+                    <td
+                      style={{
+                        padding: '14px 10px',
+                        borderBottom: '1px solid #1d3349',
+                      }}
+                    >
+                      <strong>{contact.fullName}</strong>
+                      {contact.notes ? (
+                        <small
+                          style={{
+                            display: 'block',
+                            maxWidth: 240,
+                            marginTop: 4,
+                            overflow: 'hidden',
+                            color: '#7188a2',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {contact.notes}
+                        </small>
+                      ) : null}
+                    </td>
+                    <td style={{ padding: '14px 10px', borderBottom: '1px solid #1d3349' }}>
+                      {contact.companyName || '—'}
+                    </td>
+                    <td style={{ padding: '14px 10px', borderBottom: '1px solid #1d3349' }}>
+                      {contact.sector || '—'}
+                    </td>
+                    <td style={{ padding: '14px 10px', borderBottom: '1px solid #1d3349' }}>
+                      {contact.city || '—'}
+                    </td>
+                    <td style={{ padding: '14px 10px', borderBottom: '1px solid #1d3349' }}>
+                      {contact.phoneNumber}
+                    </td>
+                    <td style={{ padding: '14px 10px', borderBottom: '1px solid #1d3349' }}>
+                      <span
+                        className="status-badge"
+                        style={{
+                          color:
+                            contact.permissionStatus === 'allowed'
+                              ? '#71efd8'
+                              : '#ffacbb',
+                        }}
+                      >
+                        {contact.permissionStatus === 'allowed'
+                          ? 'İzinli'
+                          : 'Engelli'}
+                      </span>
+                    </td>
+                    <td style={{ padding: '14px 10px', borderBottom: '1px solid #1d3349' }}>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                                                <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() =>
+                            openCrmMessageModal(contact)
+                          }
+                        >
+                          Mesaj Gönder
+                        </button>
+<button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => openEdit(contact)}
+                        >
+                          Düzenle
+                        </button>
+                        <button
+                          type="button"
+                          className="danger-button"
+                          onClick={() => void deleteContact(contact)}
+                        >
+                          Sil
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {!loading && contacts.length === 0 ? (
+              <div className="empty-state" style={{ marginTop: 16 }}>
+                <strong>CRM kaydı bulunamadı</strong>
+                <span>Yeni bir kişi ekleyerek başlayın.</span>
+              </div>
+            ) : null}
+
+            {loading ? (
+              <div className="empty-state" style={{ marginTop: 16 }}>
+                <strong>Kayıtlar yükleniyor...</strong>
+              </div>
+            ) : null}
+          </div>
+
+          <footer
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 12,
+              marginTop: 18,
+            }}
+          >
+            <span style={{ color: '#8ea2bb' }}>{visibleRange}</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={page <= 1}
+                onClick={() => setPage((current) => current - 1)}
+              >
+                Önceki
+              </button>
+              <span
+                style={{
+                  display: 'grid',
+                  minWidth: 90,
+                  placeItems: 'center',
+                  color: '#c7d5e5',
+                }}
+              >
+                {page} / {totalPages}
+              </span>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={page >= totalPages}
+                onClick={() => setPage((current) => current + 1)}
+              >
+                Sonraki
+              </button>
+            </div>
+          </footer>
+        </section>
+      </div>
+
+
+      {crmMessageContact ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeCrmMessageModal();
+            }
+          }}
+        >
+          <section
+            className="connection-modal"
+            style={{ width: 'min(680px, 100%)' }}
+          >
+            <header className="modal-header">
+              <div>
+                <span className="eyebrow">
+                  CRM WHATSAPP MESAJI
+                </span>
+                <h2>{crmMessageContact.fullName}</h2>
+                <p style={{ marginTop: 6, color: '#8ea2bb' }}>
+                  {crmMessageContact.phoneNumber}
+                  {crmMessageContact.companyName
+                    ? ` · ${crmMessageContact.companyName}`
+                    : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={closeCrmMessageModal}
+                disabled={crmMessageSending}
+                aria-label="Pencereyi kapat"
+              >
+                ×
+              </button>
+            </header>
+
+            {connectedCrmWhatsAppAccounts.length === 0 ? (
+              <div
+                className="error-message"
+                style={{ marginTop: 18 }}
+              >
+                Bağlı WhatsApp hesabı bulunamadı. Önce Hesaplar
+                bölümünden bir hesabı bağlayın.
+              </div>
+            ) : (
+              <div style={{ marginTop: 22 }}>
+                <div className="form-field">
+                  <label htmlFor="crm-message-account">
+                    Gönderen WhatsApp hesabı
+                  </label>
+                  <select
+                    id="crm-message-account"
+                    value={crmMessageAccountId}
+                    onChange={(event) =>
+                      setCrmMessageAccountId(event.target.value)
+                    }
+                    disabled={crmMessageSending}
+                    style={{
+                      width: '100%',
+                      height: 46,
+                      padding: '0 12px',
+                      border: '1px solid #314a68',
+                      borderRadius: 11,
+                      color: '#fff',
+                      background: '#091727',
+                    }}
+                  >
+                    {connectedCrmWhatsAppAccounts.map(
+                      (account) => (
+                        <option
+                          key={account.id}
+                          value={account.id}
+                        >
+                          {account.name}
+                          {account.phoneNumber
+                            ? ` · ${account.phoneNumber}`
+                            : ''}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                </div>
+
+                <div
+                  className="form-field"
+                  style={{ marginTop: 16 }}
+                >
+                  <label htmlFor="crm-message-text">
+                    Mesaj
+                  </label>
+                  <textarea
+                    id="crm-message-text"
+                    value={crmMessageText}
+                    onChange={(event) =>
+                      setCrmMessageText(event.target.value)
+                    }
+                    rows={7}
+                    maxLength={4096}
+                    placeholder="Gönderilecek WhatsApp mesajını yazın..."
+                    disabled={crmMessageSending}
+                    autoFocus
+                    style={{
+                      width: '100%',
+                      padding: 14,
+                      border: '1px solid #314a68',
+                      borderRadius: 11,
+                      resize: 'vertical',
+                      outline: 'none',
+                      color: '#fff',
+                      background: '#091727',
+                      font: 'inherit',
+                    }}
+                  />
+                  <small
+                    style={{
+                      display: 'block',
+                      marginTop: 6,
+                      textAlign: 'right',
+                      color: '#7188a2',
+                    }}
+                  >
+                    {crmMessageText.length} / 4096
+                  </small>
+                </div>
+              </div>
+            )}
+
+            {crmMessageSuccess ? (
+              <div
+                style={{
+                  marginTop: 16,
+                  padding: 12,
+                  border: '1px solid #246b5f',
+                  borderRadius: 11,
+                  color: '#71efd8',
+                  background: '#09231f',
+                }}
+              >
+                {crmMessageSuccess}
+              </div>
+            ) : null}
+
+            <footer className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={closeCrmMessageModal}
+                disabled={crmMessageSending}
+              >
+                Kapat
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() =>
+                  void sendCrmWhatsAppMessage()
+                }
+                disabled={
+                  crmMessageSending ||
+                  connectedCrmWhatsAppAccounts.length === 0 ||
+                  !crmMessageText.trim()
+                }
+              >
+                {crmMessageSending
+                  ? 'Gönderiliyor...'
+                  : 'WhatsApp Mesajı Gönder'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {importOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (
+              event.target === event.currentTarget &&
+              !importApplying
+            ) {
+              setImportOpen(false);
+            }
+          }}
+        >
+          <section
+            className="connection-modal"
+            style={{ width: 'min(980px, 100%)' }}
+          >
+            <header className="modal-header">
+              <div>
+                <span className="eyebrow">CRM İÇE AKTARMA</span>
+                <h2>
+                  {importResult
+                    ? 'İçe Aktarma Tamamlandı'
+                    : 'Dosya Önizlemesi'}
+                </h2>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setImportOpen(false)}
+                disabled={importApplying}
+                aria-label="Pencereyi kapat"
+              >
+                ×
+              </button>
+            </header>
+
+            {importResult ? (
+              <div style={{ marginTop: 22 }}>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns:
+                      'repeat(5, minmax(110px, 1fr))',
+                    gap: 12,
+                  }}
+                >
+                  {[
+                    ['Toplam', importResult.total],
+                    ['Yeni Kayıt', importResult.inserted],
+                    ['Güncellendi', importResult.updated],
+                    ['Tekrarlı', importResult.duplicates],
+                    [
+                      'Hatalı',
+                      importResult.invalidPhone +
+                        importResult.missingName,
+                    ],
+                  ].map(([label, value]) => (
+                    <div className="account-count" key={String(label)}>
+                      <span>{label}</span>
+                      <strong>{value}</strong>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="empty-state" style={{ marginTop: 18 }}>
+                  <strong>CRM kayıtları güncellendi</strong>
+                  <span>
+                    Yeni kişiler varsayılan olarak izinli kaydedildi.
+                  </span>
+                </div>
+              </div>
+            ) : importPreview ? (
+              <>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    marginTop: 18,
+                    color: '#8ea2bb',
+                  }}
+                >
+                  <span>{importPreview.fileName}</span>
+                  <span>Sayfa: {importPreview.sheetName}</span>
+                </div>
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns:
+                      'repeat(6, minmax(100px, 1fr))',
+                    gap: 10,
+                    marginTop: 16,
+                  }}
+                >
+                  {[
+                    ['Toplam', importPreview.total],
+                    ['Geçerli', importPreview.valid],
+                    ['Yeni', importPreview.inserted],
+                    ['Güncellenecek', importPreview.updated],
+                    ['Tekrarlı', importPreview.duplicates],
+                    [
+                      'Hatalı',
+                      importPreview.invalidPhone +
+                        importPreview.missingName,
+                    ],
+                  ].map(([label, value]) => (
+                    <div className="account-count" key={String(label)}>
+                      <span>{label}</span>
+                      <strong>{value}</strong>
+                    </div>
+                  ))}
+                </div>
+
+                <div
+                  style={{
+                    maxHeight: 390,
+                    marginTop: 18,
+                    overflow: 'auto',
+                  }}
+                >
+                  <table
+                    style={{
+                      width: '100%',
+                      minWidth: 850,
+                      borderCollapse: 'collapse',
+                    }}
+                  >
+                    <thead>
+                      <tr style={{ color: '#8ea2bb', textAlign: 'left' }}>
+                        {[
+                          'Satır',
+                          'Ad Soyad',
+                          'Firma',
+                          'Sektör',
+                          'İl',
+                          'Telefon',
+                          'Durum',
+                        ].map((label) => (
+                          <th
+                            key={label}
+                            style={{
+                              padding: '10px 8px',
+                              borderBottom: '1px solid #2a415d',
+                              fontSize: 12,
+                            }}
+                          >
+                            {label}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {importPreview.previewRows.map((row) => (
+                        <tr key={row.rowNumber}>
+                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #1d3349' }}>
+                            {row.rowNumber}
+                          </td>
+                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #1d3349' }}>
+                            {row.fullName || '—'}
+                          </td>
+                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #1d3349' }}>
+                            {row.companyName || '—'}
+                          </td>
+                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #1d3349' }}>
+                            {row.sector || '—'}
+                          </td>
+                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #1d3349' }}>
+                            {row.city || '—'}
+                          </td>
+                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #1d3349' }}>
+                            {row.phoneNumber || '—'}
+                          </td>
+                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #1d3349' }}>
+                            <span
+                              className="status-badge"
+                              title={row.issue ?? undefined}
+                            >
+                              {row.status === 'new'
+                                ? 'Yeni'
+                                : row.status === 'update'
+                                  ? 'Güncelle'
+                                  : row.status === 'duplicate'
+                                    ? 'Tekrarlı'
+                                    : row.issue ?? 'Hatalı'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {importPreview.total > 50 ? (
+                  <p style={{ color: '#7188a2', marginTop: 10 }}>
+                    Önizlemede ilk 50 satır gösteriliyor.
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+
+            <footer className="modal-actions">
+              {!importResult ? (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => void chooseImportFile()}
+                  disabled={importApplying || importLoading}
+                >
+                  Başka Dosya Seç
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setImportOpen(false)}
+                disabled={importApplying}
+              >
+                {importResult ? 'Kapat' : 'Vazgeç'}
+              </button>
+              {!importResult && importPreview ? (
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => void applyImport()}
+                  disabled={
+                    importApplying || importPreview.valid === 0
+                  }
+                >
+                  {importApplying
+                    ? 'İçe Aktarılıyor...'
+                    : `${importPreview.valid} Kaydı İçe Aktar`}
+                </button>
+              ) : null}
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {formOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !saving) {
+              setFormOpen(false);
+            }
+          }}
+        >
+          <form
+            className="connection-modal"
+            onSubmit={(event) => void saveContact(event)}
+            style={{ width: 'min(760px, 100%)' }}
+          >
+            <header className="modal-header">
+              <div>
+                <span className="eyebrow">
+                  {form.id ? 'KİŞİ DÜZENLE' : 'YENİ KİŞİ'}
+                </span>
+                <h2>{form.id ? 'CRM Kaydını Güncelle' : 'CRM Kişisi Ekle'}</h2>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setFormOpen(false)}
+                disabled={saving}
+                aria-label="Pencereyi kapat"
+              >
+                ×
+              </button>
+            </header>
+
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: 14,
+                marginTop: 22,
+              }}
+            >
+              {[
+                ['fullName', 'Ad Soyad', 'Örnek: Ali YAKALI'],
+                ['companyName', 'Firma', 'Örnek: AI Operasyon'],
+                ['sector', 'Sektör', 'Örnek: Yazılım'],
+                ['city', 'İl', 'Örnek: İstanbul'],
+                ['phoneNumber', 'Telefon', 'Örnek: 905551112233'],
+              ].map(([field, label, placeholder]) => (
+                <div
+                  className="form-field"
+                  key={field}
+                  style={
+                    field === 'fullName' || field === 'phoneNumber'
+                      ? { gridColumn: 'span 1' }
+                      : undefined
+                  }
+                >
+                  <label htmlFor={`crm-${field}`}>{label}</label>
+                  <input
+                    id={`crm-${field}`}
+                    value={String(
+                      form[field as keyof CrmContactSaveInput] ?? '',
+                    )}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        [field]: event.target.value,
+                      }))
+                    }
+                    placeholder={placeholder}
+                    required={
+                      field === 'fullName' || field === 'phoneNumber'
+                    }
+                    disabled={saving}
+                  />
+                </div>
+              ))}
+
+              <div className="form-field">
+                <label htmlFor="crm-form-permission">İzin durumu</label>
+                <select
+                  id="crm-form-permission"
+                  value={form.permissionStatus}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      permissionStatus:
+                        event.target.value as CrmPermissionStatus,
+                    }))
+                  }
+                  disabled={saving}
+                  style={{
+                    width: '100%',
+                    height: 46,
+                    padding: '0 12px',
+                    border: '1px solid #314a68',
+                    borderRadius: 11,
+                    color: '#fff',
+                    background: '#091727',
+                  }}
+                >
+                  <option value="allowed">İzinli</option>
+                  <option value="blocked">Engelli</option>
+                </select>
+              </div>
+
+              <div
+                className="form-field"
+                style={{ gridColumn: '1 / -1' }}
+              >
+                <label htmlFor="crm-notes">Notlar</label>
+                <textarea
+                  id="crm-notes"
+                  value={form.notes ?? ''}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      notes: event.target.value,
+                    }))
+                  }
+                  rows={4}
+                  disabled={saving}
+                  style={{
+                    width: '100%',
+                    padding: 14,
+                    border: '1px solid #314a68',
+                    borderRadius: 11,
+                    resize: 'vertical',
+                    outline: 'none',
+                    color: '#fff',
+                    background: '#091727',
+                    font: 'inherit',
+                  }}
+                />
+              </div>
+            </div>
+
+            <footer className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setFormOpen(false)}
+                disabled={saving}
+              >
+                Vazgeç
+              </button>
+              <button
+                type="submit"
+                className="primary-button"
+                disabled={saving}
+              >
+                {saving ? 'Kaydediliyor...' : 'Kaydet'}
+              </button>
+            </footer>
+          </form>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function App() {
+  const [activePage, setActivePage] = useState<AppPage>('accounts');
+
+  return (
+    <div className="application-layout">
+      <aside className="application-sidebar">
+        <div className="application-brand">
+          <span className="application-brand__mark">AI</span>
+          <div>
+            <strong>AI OPERASYON</strong>
+            <small>WhatsApp CRM</small>
+          </div>
+        </div>
+
+        <nav className="application-navigation" aria-label="Ana menü">
+          {[
+            ['accounts', 'H', 'Hesaplar', 'WhatsApp bağlantıları'],
+            ['inbox', 'G', 'Gelen Kutusu', 'Hesaba özel mesajlar'],
+            ['crm', 'C', 'CRM', 'Kişiler ve izinler'],
+            ['campaigns', 'K', 'Kampanyalar', 'Hedef kitle ve taslaklar'],
+            ['templates', 'Ş', 'Şablonlar', 'Hazır mesaj kütüphanesi'],
+          ].map(([page, icon, title, subtitle]) => (
+            <button
+              key={page}
+              type="button"
+              className={
+                activePage === page
+                  ? 'application-navigation__item application-navigation__item--active'
+                  : 'application-navigation__item'
+              }
+              onClick={() => setActivePage(page as AppPage)}
+            >
+              <span>{icon}</span>
+              <div>
+                <strong>{title}</strong>
+                <small>{subtitle}</small>
+              </div>
+            </button>
+          ))}
+        </nav>
+
+        <div className="application-sidebar__footer">
+          <span>Yerel çalışma modu</span>
+          <strong>Veriler bu bilgisayarda</strong>
+        </div>
+      </aside>
+
+      <main className="application-content">
+        {activePage === 'accounts' ? (
+          <WhatsAppAccountsPage />
+        ) : activePage === 'inbox' ? (
+          <InboxWorkspacePage />
+        ) : activePage === 'crm' ? (
+          <CrmPage />
+        ) : activePage === 'campaigns' ? (
+          <CampaignPage />
+        ) : (
+          <MessageTemplatesPage />
+        )}
+      </main>
+    </div>
+  );
+}
+
+export default App;

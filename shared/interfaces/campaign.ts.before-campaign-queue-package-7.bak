@@ -1,0 +1,58 @@
+export type CampaignStatus = 'draft' | 'ready';
+
+export interface Campaign {
+  id: string;
+  name: string;
+  accountId: string | null;
+  accountName: string | null;
+  message: string;
+  sectors: string[];
+  cities: string[];
+  onlyAllowed: boolean;
+  estimatedRecipients: number;
+  status: CampaignStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CampaignListRequest {
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface CampaignSnapshot {
+  campaigns: Campaign[];
+  total: number;
+}
+
+export interface CampaignSaveInput {
+  id?: string;
+  name: string;
+  accountId?: string | null;
+  message: string;
+  sectors?: string[];
+  cities?: string[];
+  onlyAllowed?: boolean;
+  status?: CampaignStatus;
+}
+
+export interface CampaignDeleteRequest {
+  id: string;
+}
+
+export interface CampaignDeleteResult {
+  deleted: boolean;
+}
+
+export interface CampaignAudienceRequest {
+  sectors?: string[];
+  cities?: string[];
+  onlyAllowed?: boolean;
+}
+
+export interface CampaignAudienceEstimate {
+  total: number;
+  sectors: string[];
+  cities: string[];
+}
