@@ -1,0 +1,103 @@
+              {([
+                ['sectors', 'Sektörler', sectors, sectorSearch, setSectorSearch],
+                ['cities', 'İller', cities, citySearch, setCitySearch],
+              ] as const).map(([field, label, values, filterText, setFilterText]) => {
+                const selectedValues = form[field] ?? [];
+                const filteredValues = values.filter((value) =>
+                  value.toLocaleLowerCase('tr-TR').includes(
+                    filterText.trim().toLocaleLowerCase('tr-TR'),
+                  ),
+                );
+
+                return (
+                  <div key={field} style={{
+                    padding: 14,
+                    border: '1px solid #29415b',
+                    borderRadius: 13,
+                    background: '#0a192a',
+                  }}>
+                    <strong>{label}</strong>
+                    <p style={{ color: '#7188a2', fontSize: 12 }}>
+                      Seçilmezse tümü hedeflenir.
+                    </p>
+
+                    <details style={{ position: 'relative' }}>
+                      <summary style={{
+                        cursor: 'pointer',
+                        listStyle: 'none',
+                        padding: '12px 14px',
+                        border: '1px solid #314a68',
+                        borderRadius: 11,
+                        background: '#091727',
+                        color: '#dfeaf5',
+                      }}>
+                        {selectedValues.length > 0
+                          ? `${selectedValues.length} seçim yapıldı`
+                          : `${label} seçin`}
+                      </summary>
+
+                      <div style={{
+                        marginTop: 8,
+                        padding: 10,
+                        border: '1px solid #314a68',
+                        borderRadius: 11,
+                        background: '#071421',
+                      }}>
+                        <input
+                          type="search"
+                          value={filterText}
+                          onChange={(event) => setFilterText(event.target.value)}
+                          placeholder={`${label} içinde ara`}
+                          style={{ marginBottom: 8 }}
+                        />
+
+                        <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+                          {filteredValues.map((value) => {
+                            const selected = selectedValues.includes(value);
+                            return (
+                              <label
+                                key={value}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 9,
+                                  padding: '8px 6px',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selected}
+                                  onChange={() => toggleValue(field, value)}
+                                />
+                                <span>{value}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </details>
+
+                    {selectedValues.length > 0 ? (
+                      <div style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: 7,
+                        marginTop: 10,
+                      }}>
+                        {selectedValues.map((value) => (
+                          <button
+                            key={value}
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => toggleValue(field, value)}
+                            style={{ padding: '6px 9px' }}
+                          >
+                            {value} ×
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}

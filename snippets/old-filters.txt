@@ -1,0 +1,38 @@
+              {([
+                ['sectors', 'Sektörler', sectors],
+                ['cities', 'İller', cities],
+              ] as const).map(([field, label, values]) => (
+                <div key={field} style={{
+                  minHeight: 180, padding: 14,
+                  border: '1px solid #29415b',
+                  borderRadius: 13, background: '#0a192a',
+                }}>
+                  <strong>{label}</strong>
+                  <p style={{ color: '#7188a2', fontSize: 12 }}>
+                    Seçilmezse tümü hedeflenir.
+                  </p>
+                  <div style={{
+                    display: 'flex', maxHeight: 190,
+                    gap: 8, overflowY: 'auto', flexWrap: 'wrap',
+                  }}>
+                    {values.map((value) => {
+                      const selected = (form[field] ?? []).includes(value);
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          className={
+                            selected
+                              ? 'application-navigation__item application-navigation__item--active'
+                              : 'application-navigation__item'
+                          }
+                          style={{ width: 'auto', padding: '8px 10px' }}
+                          onClick={() => toggleValue(field, value)}
+                        >
+                          <strong>{value}</strong>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}

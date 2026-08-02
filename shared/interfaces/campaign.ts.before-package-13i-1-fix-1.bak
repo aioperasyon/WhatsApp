@@ -36,7 +36,6 @@ export interface Campaign {
   accountId: string | null;
   accountName: string | null;
   message: string;
-  messageVariants: string[];
   sectors: string[];
   cities: string[];
   onlyAllowed: boolean;
@@ -69,7 +68,6 @@ export interface CampaignSaveInput {
   name: string;
   accountId?: string | null;
   message: string;
-  messageVariants?: string[];
   sectors?: string[];
   cities?: string[];
   onlyAllowed?: boolean;

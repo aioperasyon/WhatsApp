@@ -1,0 +1,605 @@
+import { app, ipcMain } from 'electron';
+import { getDatabase } from '../database/database.js';
+import { deleteCampaign, listCampaigns, saveCampaign, } from '../repositories/campaign.repository.js';
+import { cancelCampaign, listCampaignRecipients, pauseCampaign, recoverInterruptedCampaigns, startCampaignScheduler, stopCampaignScheduler, resumeCampaign, startCampaign, } from '../services/campaign-queue.service.js';
+let campaignSchedulerShutdownRegistered = false;
+const IPC_CHANNELS = {
+    list: 'campaigns:list',
+    save: 'campaigns:save',
+    delete: 'campaigns:delete',
+    estimate: 'campaigns:estimate-audience',
+    analyze: 'campaigns:analyze-audience',
+    options: 'campaigns:audience-options',
+    start: 'campaigns:start',
+    pause: 'campaigns:pause',
+    resume: 'campaigns:resume',
+    cancel: 'campaigns:cancel',
+    recipients: 'campaigns:list-recipients',
+};
+function normalizeValues(values) {
+    return Array.from(new Set((values ?? [])
+        .map((value) => value.trim())
+        .filter(Boolean))).sort((a, b) => a.localeCompare(b, 'tr'));
+}
+function buildAudienceWhere(request) {
+    const sectors = normalizeValues(request.sectors);
+    const cities = normalizeValues(request.cities);
+    const where = [];
+    const parameters = [];
+    if (request.onlyAllowed !== false) {
+        where.push(`permission_status = 'allowed'`);
+    }
+    if (sectors.length > 0) {
+        where.push(`sector IN (${sectors.map(() => '?').join(', ')})`);
+        parameters.push(...sectors);
+    }
+    if (cities.length > 0) {
+        where.push(`city IN (${cities.map(() => '?').join(', ')})`);
+        parameters.push(...cities);
+    }
+    return {
+        sql: where.length > 0 ? `WHERE ${where.join(' AND ')}` : '',
+        parameters,
+        sectors,
+        cities,
+    };
+}
+function estimateAudience(request = {}) {
+    const built = buildAudienceWhere(request);
+    const row = getDatabase()
+        .prepare(`
+      SELECT COUNT(*) AS total
+      FROM crm_contacts
+      ${built.sql}
+    `)
+        .get(...built.parameters);
+    return {
+        total: Number(row.total ?? 0),
+        sectors: built.sectors,
+        cities: built.cities,
+    };
+}
+function analyzeAudience(request = {}) {
+    const database = getDatabase();
+    const sectors = normalizeValues(request.sectors);
+    const cities = normalizeValues(request.cities);
+    const baseWhere = [];
+    const baseParameters = [];
+    if (sectors.length > 0) {
+        baseWhere.push(`sector IN (${sectors.map(() => '?').join(', ')})`);
+        baseParameters.push(...sectors);
+    }
+    if (cities.length > 0) {
+        baseWhere.push(`city IN (${cities.map(() => '?').join(', ')})`);
+        baseParameters.push(...cities);
+    }
+    const baseSql = baseWhere.length > 0
+        ? `WHERE ${baseWhere.join(' AND ')}`
+        : '';
+    const totalCrmRow = database
+        .prepare('SELECT COUNT(*) AS total FROM crm_contacts')
+        .get();
+    const filteredRow = database
+        .prepare(`
+      SELECT COUNT(*) AS total
+      FROM crm_contacts
+      ${baseSql}
+    `)
+        .get(...baseParameters);
+    const allowedWhere = [...baseWhere, `permission_status = 'allowed'`];
+    const allowedSql = `WHERE ${allowedWhere.join(' AND ')}`;
+    const allowedRow = database
+        .prepare(`
+      SELECT COUNT(*) AS total
+      FROM crm_contacts
+      ${allowedSql}
+    `)
+        .get(...baseParameters);
+    const validPhoneWhere = [
+        ...allowedWhere,
+        `phone_number IS NOT NULL`,
+        `LENGTH(
+      REPLACE(
+        REPLACE(
+          REPLACE(
+            REPLACE(
+              REPLACE(TRIM(phone_number), ' ', ''),
+              '+',
+              ''
+            ),
+            '-',
+            ''
+          ),
+          '(',
+          ''
+        ),
+        ')',
+        ''
+      )
+    ) >= 10`,
+    ];
+    const validPhoneSql = `WHERE ${validPhoneWhere.join(' AND ')}`;
+    const validPhoneRow = database
+        .prepare(`
+      SELECT COUNT(*) AS total
+      FROM crm_contacts
+      ${validPhoneSql}
+    `)
+        .get(...baseParameters);
+    const totalCrm = Number(totalCrmRow.total ?? 0);
+    const filtered = Number(filteredRow.total ?? 0);
+    const allowed = Number(allowedRow.total ?? 0);
+    const validPhone = Number(validPhoneRow.total ?? 0);
+    const sendable = request.onlyAllowed === false
+        ? filtered
+        : validPhone;
+    const dailyLimit = request.dailyLimit && request.dailyLimit > 0
+        ? Math.trunc(request.dailyLimit)
+        : null;
+    const estimatedDays = dailyLimit && sendable > 0
+        ? Math.max(1, Math.ceil(sendable / dailyLimit))
+        : 0;
+    const estimatedCompletionAt = estimatedDays > 0
+        ? new Date(Date.now() + estimatedDays * 24 * 60 * 60 * 1000).toISOString()
+        : null;
+    return {
+        totalCrm,
+        filtered,
+        allowed,
+        validPhone,
+        sendable,
+        excludedByPermission: Math.max(0, filtered - allowed),
+        excludedByPhone: Math.max(0, allowed - validPhone),
+        estimatedDays,
+        estimatedCompletionAt,
+    };
+}
+function getAudienceOptions() {
+    const database = getDatabase();
+    const sectors = database
+        .prepare(`
+      SELECT DISTINCT sector AS value
+      FROM crm_contacts
+      WHERE sector IS NOT NULL AND TRIM(sector) <> ''
+      ORDER BY sector COLLATE NOCASE
+    `)
+        .all();
+    const cities = database
+        .prepare(`
+      SELECT DISTINCT city AS value
+      FROM crm_contacts
+      WHERE city IS NOT NULL AND TRIM(city) <> ''
+      ORDER BY city COLLATE NOCASE
+    `)
+        .all();
+    return {
+        sectors: sectors.map((row) => row.value),
+        cities: cities.map((row) => row.value),
+    };
+}
+function ensureCampaignPerformanceIndexes() {
+    const database = getDatabase();
+    database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_campaigns_status_updated
+      ON campaigns(status, updated_at);
+
+    CREATE INDEX IF NOT EXISTS idx_campaign_recipients_campaign_status
+      ON campaign_recipients(campaign_id, status);
+
+    CREATE INDEX IF NOT EXISTS idx_campaign_recipients_status_updated
+      ON campaign_recipients(status, updated_at);
+
+    CREATE INDEX IF NOT EXISTS idx_campaign_recipients_phone
+      ON campaign_recipients(phone_number);
+
+    CREATE INDEX IF NOT EXISTS idx_campaign_settings_scheduled_at
+      ON campaign_settings(scheduled_at);
+
+    CREATE INDEX IF NOT EXISTS idx_campaign_settings_campaign
+      ON campaign_settings(campaign_id);
+  
+
+    CREATE INDEX IF NOT EXISTS idx_campaign_recipients_active_queue
+      ON campaign_recipients (campaign_id, id)
+      WHERE status IN ('pending', 'sending');
+
+    CREATE INDEX IF NOT EXISTS idx_campaigns_active_status
+      ON campaigns (status, updated_at)
+      WHERE status IN ('running', 'paused', 'scheduled');
+`);
+}
+function reportUnknownCampaignStatuses() {
+    const database = getDatabase();
+    try {
+        const unknownCampaignStatuses = database
+            .prepare(`SELECT status, COUNT(*) AS count
+         FROM campaigns
+         WHERE status NOT IN (
+           'draft',
+           'scheduled',
+           'running',
+           'paused',
+           'completed',
+           'cancelled',
+           'failed'
+         )
+         GROUP BY status
+         ORDER BY count DESC`)
+            .all();
+        const unknownRecipientStatuses = database
+            .prepare(`SELECT status, COUNT(*) AS count
+         FROM campaign_recipients
+         WHERE status NOT IN (
+           'pending',
+           'sending',
+           'sent',
+           'delivered',
+           'read',
+           'failed',
+           'cancelled',
+           'skipped'
+         )
+         GROUP BY status
+         ORDER BY count DESC`)
+            .all();
+        if (unknownCampaignStatuses.length === 0 &&
+            unknownRecipientStatuses.length === 0) {
+            console.info('[Campaign Engine] Kampanya ve alıcı durum değerleri doğrulandı.');
+            return;
+        }
+        const campaignSummary = unknownCampaignStatuses.length > 0
+            ? unknownCampaignStatuses
+                .map((row) => `${row.status}=${row.count}`)
+                .join(', ')
+            : 'yok';
+        const recipientSummary = unknownRecipientStatuses.length > 0
+            ? unknownRecipientStatuses
+                .map((row) => `${row.status}=${row.count}`)
+                .join(', ')
+            : 'yok';
+        console.warn(`[Campaign Engine] Bilinmeyen durum değerleri: kampanya=${campaignSummary}; alıcı=${recipientSummary}.`);
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Durum değeri doğrulaması başarısız.';
+        console.error(`[Campaign Engine] Durum değeri doğrulaması başarısız: ${message}`);
+    }
+}
+function reportDuplicateCampaignRecipients() {
+    const database = getDatabase();
+    try {
+        const duplicateGroupCount = Number(database
+            .prepare(`SELECT COUNT(*)
+           FROM (
+             SELECT campaign_id, phone
+             FROM campaign_recipients
+             WHERE phone IS NOT NULL
+               AND TRIM(phone) <> ''
+             GROUP BY campaign_id, phone
+             HAVING COUNT(*) > 1
+           ) AS duplicate_groups`)
+            .pluck()
+            .get() ?? 0);
+        const duplicateRecipientCount = Number(database
+            .prepare(`SELECT COALESCE(SUM(recipient_count - 1), 0)
+           FROM (
+             SELECT COUNT(*) AS recipient_count
+             FROM campaign_recipients
+             WHERE phone IS NOT NULL
+               AND TRIM(phone) <> ''
+             GROUP BY campaign_id, phone
+             HAVING COUNT(*) > 1
+           ) AS duplicate_recipients`)
+            .pluck()
+            .get() ?? 0);
+        const emptyPhoneCount = Number(database
+            .prepare(`SELECT COUNT(*)
+           FROM campaign_recipients
+           WHERE phone IS NULL
+              OR TRIM(phone) = ''`)
+            .pluck()
+            .get() ?? 0);
+        if (duplicateGroupCount === 0 &&
+            duplicateRecipientCount === 0 &&
+            emptyPhoneCount === 0) {
+            console.info('[Campaign Engine] Kampanya alıcı benzersizlik kontrolü başarılı.');
+            return;
+        }
+        console.warn(`[Campaign Engine] Alıcı veri uyarısı: yinelenen telefon grubu=${duplicateGroupCount}, fazla yinelenen kayıt=${duplicateRecipientCount}, boş telefon=${emptyPhoneCount}.`);
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Kampanya alıcı benzersizlik kontrolü başarısız.';
+        console.error(`[Campaign Engine] Alıcı benzersizlik kontrolü başarısız: ${message}`);
+    }
+}
+function reportStaleCampaignRecipients() {
+    const database = getDatabase();
+    try {
+        const staleSendingCount = Number(database
+            .prepare(`SELECT COUNT(*)
+           FROM campaign_recipients
+           WHERE status = 'sending'
+             AND datetime(updated_at) <= datetime('now', '-15 minutes')`)
+            .pluck()
+            .get() ?? 0);
+        const staleRunningCampaignCount = Number(database
+            .prepare(`SELECT COUNT(*)
+           FROM campaigns
+           WHERE status = 'running'
+             AND datetime(updated_at) <= datetime('now', '-30 minutes')`)
+            .pluck()
+            .get() ?? 0);
+        if (staleSendingCount === 0 &&
+            staleRunningCampaignCount === 0) {
+            console.info('[Campaign Engine] Takılı kampanya ve alıcı kontrolü başarılı.');
+            return;
+        }
+        console.warn(`[Campaign Engine] Takılı işlem uyarısı: 15 dakikadan eski sending alıcı=${staleSendingCount}, 30 dakikadan eski running kampanya=${staleRunningCampaignCount}.`);
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Takılı kampanya kontrolü başarısız.';
+        console.error(`[Campaign Engine] Takılı işlem kontrolü başarısız: ${message}`);
+    }
+}
+function reportCampaignDatabaseHealth() {
+    const database = getDatabase();
+    try {
+        const pageCount = Number(database.pragma('page_count', { simple: true })) || 0;
+        const freeListCount = Number(database.pragma('freelist_count', { simple: true })) || 0;
+        const pageSize = Number(database.pragma('page_size', { simple: true })) || 0;
+        const totalBytes = pageCount * pageSize;
+        const freeBytes = freeListCount * pageSize;
+        const freeRatio = pageCount > 0
+            ? Number(((freeListCount / pageCount) * 100).toFixed(2))
+            : 0;
+        console.info(`[Campaign Database] Boyut: ${totalBytes} bayt, boş alan: ${freeBytes} bayt, boş sayfa oranı: %${freeRatio}.`);
+        if (freeRatio >= 25) {
+            console.warn('[Campaign Database] Boş sayfa oranı yüksek. Uygun bakım zamanında VACUUM düşünülebilir.');
+        }
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Veritabanı sağlık raporu oluşturulamadı.';
+        console.error(`[Campaign Database] Sağlık raporu başarısız: ${message}`);
+    }
+}
+function configureCampaignDatabasePragmas() {
+    const database = getDatabase();
+    try {
+        database.pragma('busy_timeout = 5000');
+        database.pragma('synchronous = NORMAL');
+        database.pragma('wal_autocheckpoint = 1000');
+        database.pragma('temp_store = MEMORY');
+        database.pragma('cache_size = -20000');
+        console.info('[Campaign Database] Performans ve kilit bekleme ayarları uygulandı.');
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Veritabanı PRAGMA ayarları uygulanamadı.';
+        console.error(`[Campaign Database] PRAGMA ayarları başarısız: ${message}`);
+    }
+}
+function checkCampaignForeignKeys() {
+    const database = getDatabase();
+    try {
+        database.pragma('foreign_keys = ON');
+        const violations = database
+            .prepare('PRAGMA foreign_key_check')
+            .all();
+        if (violations.length > 0) {
+            const summary = violations
+                .slice(0, 10)
+                .map((row) => JSON.stringify(row))
+                .join(', ');
+            console.error(`[Campaign Database] Foreign key ihlali bulundu: ${summary}`);
+            if (violations.length > 10) {
+                console.error(`[Campaign Database] Toplam foreign key ihlali: ${violations.length}`);
+            }
+            return;
+        }
+        console.info('[Campaign Database] Foreign key kontrolü başarılı.');
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Foreign key kontrolü başarısız.';
+        console.error(`[Campaign Database] Foreign key kontrolü başarısız: ${message}`);
+    }
+}
+function checkCampaignDatabaseIntegrity() {
+    const database = getDatabase();
+    try {
+        const rows = database
+            .prepare('PRAGMA quick_check')
+            .all();
+        const results = rows.map((row) => {
+            const value = Object.values(row)[0];
+            return typeof value === 'string'
+                ? value
+                : String(value ?? '');
+        });
+        const isHealthy = results.length === 1 &&
+            results[0]?.toLowerCase() === 'ok';
+        if (!isHealthy) {
+            console.error(`[Campaign Database] Veritabanı bütünlük sorunu: ${results.join(', ')}`);
+            return;
+        }
+        console.info('[Campaign Database] Veritabanı bütünlük kontrolü başarılı.');
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Veritabanı bütünlük kontrolü başarısız.';
+        console.error(`[Campaign Database] Bütünlük kontrolü başarısız: ${message}`);
+    }
+}
+function verifyCampaignPerformanceIndexes() {
+    const database = getDatabase();
+    const requiredIndexes = [
+        'idx_campaigns_status_updated',
+        'idx_campaign_recipients_campaign_status',
+        'idx_campaign_recipients_status_updated',
+        'idx_campaign_recipients_phone',
+        'idx_campaign_settings_scheduled_at',
+        'idx_campaign_settings_campaign',
+        'idx_campaign_recipients_active_queue',
+        'idx_campaigns_active_status',
+    ];
+    try {
+        const rows = database
+            .prepare(`SELECT name
+         FROM sqlite_master
+         WHERE type = 'index'
+           AND name LIKE 'idx_campaign%'`)
+            .all();
+        const existingIndexes = new Set(rows.map((row) => row.name));
+        const missingIndexes = requiredIndexes.filter((indexName) => !existingIndexes.has(indexName));
+        if (missingIndexes.length > 0) {
+            console.warn(`[Campaign Database] Eksik indeksler: ${missingIndexes.join(', ')}`);
+            return;
+        }
+        console.info(`[Campaign Database] ${requiredIndexes.length} performans indeksi doğrulandı.`);
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Kampanya indeks doğrulaması başarısız.';
+        console.error(`[Campaign Database] İndeks doğrulaması başarısız: ${message}`);
+    }
+}
+function optimizeCampaignDatabase() {
+    const database = getDatabase();
+    try {
+        database.pragma('analysis_limit = 400');
+        database.pragma('optimize');
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Veritabanı optimizasyonu başarısız.';
+        console.error(`[Campaign Database] Optimize başarısız: ${message}`);
+    }
+}
+function maintainCampaignDatabaseOnShutdown() {
+    const database = getDatabase();
+    try {
+        database.pragma('wal_checkpoint(PASSIVE)');
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'WAL checkpoint başarısız.';
+        console.error(`[Campaign Database] Checkpoint başarısız: ${message}`);
+    }
+    optimizeCampaignDatabase();
+}
+function reportCampaignStartupHealthSummary() {
+    const database = getDatabase();
+    try {
+        const campaignRow = database
+            .prepare(`SELECT
+           COUNT(*) AS total,
+           SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+           SUM(CASE WHEN status = 'scheduled' THEN 1 ELSE 0 END) AS scheduled,
+           SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END) AS paused
+         FROM campaigns`)
+            .get();
+        const recipientRow = database
+            .prepare(`SELECT
+           COUNT(*) AS total,
+           SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+           SUM(CASE WHEN status = 'sending' THEN 1 ELSE 0 END) AS sending,
+           SUM(
+             CASE
+               WHEN status IN ('sent', 'delivered', 'read')
+               THEN 1
+               ELSE 0
+             END
+           ) AS successful,
+           SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+           SUM(
+             CASE
+               WHEN phone_number IS NULL
+                 OR TRIM(phone_number) = ''
+               THEN 1
+               ELSE 0
+             END
+           ) AS invalid_phone
+         FROM campaign_recipients`)
+            .get();
+        const orphanRecipientCount = Number(database
+            .prepare(`SELECT COUNT(*)
+           FROM campaign_recipients AS recipient
+           LEFT JOIN campaigns AS campaign
+             ON campaign.id = recipient.campaign_id
+           WHERE campaign.id IS NULL`)
+            .pluck()
+            .get() ?? 0);
+        const missingSettingsCount = Number(database
+            .prepare(`SELECT COUNT(*)
+           FROM campaigns AS campaign
+           LEFT JOIN campaign_settings AS settings
+             ON settings.campaign_id = campaign.id
+           WHERE settings.campaign_id IS NULL`)
+            .pluck()
+            .get() ?? 0);
+        console.info(`[Campaign Engine] Başlangıç özeti: kampanya=${Number(campaignRow.total ?? 0)}, running=${Number(campaignRow.running ?? 0)}, scheduled=${Number(campaignRow.scheduled ?? 0)}, paused=${Number(campaignRow.paused ?? 0)}.`);
+        console.info(`[Campaign Engine] Alıcı özeti: toplam=${Number(recipientRow.total ?? 0)}, pending=${Number(recipientRow.pending ?? 0)}, sending=${Number(recipientRow.sending ?? 0)}, başarılı=${Number(recipientRow.successful ?? 0)}, failed=${Number(recipientRow.failed ?? 0)}.`);
+        if (Number(recipientRow.invalid_phone ?? 0) > 0 ||
+            orphanRecipientCount > 0 ||
+            missingSettingsCount > 0) {
+            console.warn(`[Campaign Engine] Veri uyarısı: geçersiz telefon=${Number(recipientRow.invalid_phone ?? 0)}, sahipsiz alıcı=${orphanRecipientCount}, ayarsız kampanya=${missingSettingsCount}.`);
+        }
+    }
+    catch (reason) {
+        const message = reason instanceof Error
+            ? reason.message
+            : 'Kampanya başlangıç sağlık özeti oluşturulamadı.';
+        console.error(`[Campaign Engine] Başlangıç sağlık özeti başarısız: ${message}`);
+    }
+}
+function registerCampaignSchedulerShutdown() {
+    if (campaignSchedulerShutdownRegistered) {
+        return;
+    }
+    campaignSchedulerShutdownRegistered = true;
+    app.once('before-quit', () => {
+        stopCampaignScheduler();
+        maintainCampaignDatabaseOnShutdown();
+    });
+}
+export function registerCampaignIpcHandlers() {
+    recoverInterruptedCampaigns();
+    configureCampaignDatabasePragmas();
+    ensureCampaignPerformanceIndexes();
+    checkCampaignDatabaseIntegrity();
+    checkCampaignForeignKeys();
+    verifyCampaignPerformanceIndexes();
+    reportCampaignDatabaseHealth();
+    reportCampaignStartupHealthSummary();
+    optimizeCampaignDatabase();
+    registerCampaignSchedulerShutdown();
+    startCampaignScheduler();
+    Object.values(IPC_CHANNELS).forEach((channel) => {
+        ipcMain.removeHandler(channel);
+    });
+    ipcMain.handle(IPC_CHANNELS.list, (_event, request) => listCampaigns(request));
+    ipcMain.handle(IPC_CHANNELS.save, (_event, input) => saveCampaign(input));
+    ipcMain.handle(IPC_CHANNELS.delete, (_event, request) => deleteCampaign(request));
+    ipcMain.handle(IPC_CHANNELS.estimate, (_event, request) => estimateAudience(request));
+    ipcMain.handle(IPC_CHANNELS.analyze, (_event, request) => analyzeAudience(request));
+    ipcMain.handle(IPC_CHANNELS.options, () => getAudienceOptions());
+    ipcMain.handle(IPC_CHANNELS.start, (_event, request) => startCampaign(request.id));
+    ipcMain.handle(IPC_CHANNELS.pause, (_event, request) => pauseCampaign(request.id));
+    ipcMain.handle(IPC_CHANNELS.resume, (_event, request) => resumeCampaign(request.id));
+    ipcMain.handle(IPC_CHANNELS.cancel, (_event, request) => cancelCampaign(request.id));
+    ipcMain.handle(IPC_CHANNELS.recipients, (_event, request) => listCampaignRecipients(request));
+}
+//# sourceMappingURL=register-campaign-ipc.js.map

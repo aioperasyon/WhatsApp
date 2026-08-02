@@ -63,22 +63,6 @@ type CampaignApi = typeof window.desktopAPI & {
   }>;
 };
 
-const MESSAGE_VARIABLES = [
-  { token: '{ad}', label: 'Ad Soyad', sample: 'Ayşe Yılmaz' },
-  { token: '{firma}', label: 'Firma', sample: 'Örnek Firma' },
-  { token: '{sektor}', label: 'Sektör', sample: 'Güzellik Merkezi' },
-  { token: '{il}', label: 'İl', sample: 'İstanbul' },
-  { token: '{telefon}', label: 'Telefon', sample: '905551112233' },
-] as const;
-
-function previewMessageVariant(value: string): string {
-  return MESSAGE_VARIABLES.reduce(
-    (current, variable) =>
-      current.split(variable.token).join(variable.sample),
-    value,
-  );
-}
-
 const EMPTY_FORM: CampaignSaveInput = {
   name: '',
   accountId: '',
@@ -158,16 +142,6 @@ export function CampaignPage() {
   const connectedAccounts = useMemo(
     () => accounts.filter((account) => account.status === 'connected'),
     [accounts],
-  );
-
-  const liveCampaign = useMemo(
-    () =>
-      logCampaign
-        ? campaigns.find(
-            (campaign) => campaign.id === logCampaign.id,
-          ) ?? logCampaign
-        : null,
-    [campaigns, logCampaign],
   );
 
   const loadCampaigns = useCallback(async (): Promise<void> => {
@@ -441,78 +415,6 @@ export function CampaignPage() {
     });
   };
 
-  const duplicateMessageVariant = (index: number): void => {
-    setForm((current) => {
-      const variants = [...(current.messageVariants ?? [current.message])];
-
-      if (variants.length >= 20) {
-        setError('Bir kampanyaya en fazla 20 mesaj kalıbı eklenebilir.');
-        return current;
-      }
-
-      const next = [...variants];
-      next.splice(index + 1, 0, variants[index] ?? '');
-
-      return {
-        ...current,
-        message: next[0] ?? '',
-        messageVariants: next,
-      };
-    });
-  };
-
-  const moveMessageVariant = (
-    index: number,
-    direction: -1 | 1,
-  ): void => {
-    setForm((current) => {
-      const variants = [...(current.messageVariants ?? [current.message])];
-      const targetIndex = index + direction;
-
-      if (
-        targetIndex < 0 ||
-        targetIndex >= variants.length
-      ) {
-        return current;
-      }
-
-      const next = [...variants];
-      const currentValue = next[index] ?? '';
-      next[index] = next[targetIndex] ?? '';
-      next[targetIndex] = currentValue;
-
-      return {
-        ...current,
-        message: next[0] ?? '',
-        messageVariants: next,
-      };
-    });
-  };
-
-  const insertMessageVariable = (
-    index: number,
-    token: string,
-  ): void => {
-    setForm((current) => {
-      const variants = [...(current.messageVariants ?? [current.message])];
-      const currentValue = variants[index] ?? '';
-      const separator =
-        currentValue &&
-        !currentValue.endsWith(' ')
-          ? ' '
-          : '';
-
-      variants[index] =
-        `${currentValue}${separator}${token}`;
-
-      return {
-        ...current,
-        message: variants[0] ?? '',
-        messageVariants: variants,
-      };
-    });
-  };
-
   const toggleValue = (
     field: 'sectors' | 'cities',
     value: string,
@@ -538,62 +440,6 @@ export function CampaignPage() {
       const saved = await api.saveCampaign(form);
       setFormOpen(false);
       setNotice(`“${saved.name}” kaydedildi.`);
-      await loadCampaigns();
-    } catch (reason: unknown) {
-      setError(readError(reason));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const saveAndStart = async (): Promise<void> => {
-    if (!form.accountId) {
-      setError(
-        'Kampanyayı göndermek için bağlı bir WhatsApp hesabı seçin.',
-      );
-      return;
-    }
-
-    const variants =
-      form.messageVariants?.map((value) => value.trim()).filter(Boolean) ??
-      [];
-
-    if (variants.length === 0) {
-      setError('En az bir mesaj kalıbı yazın.');
-      return;
-    }
-
-    if (
-      !window.confirm(
-        `Kampanya kaydedilip ${estimate} tahmini alıcı için hemen başlatılsın mı?`,
-      )
-    ) {
-      return;
-    }
-
-    setSaving(true);
-    setError(null);
-
-    try {
-      const saved = await api.saveCampaign({
-        ...form,
-        status: 'ready',
-      });
-
-      const result = await api.startCampaign({
-        id: saved.id,
-      });
-
-      setFormOpen(false);
-      setNotice(result.message);
-      setLogCampaign(result.campaign);
-      setLogs(
-        await api.listCampaignRecipients({
-          campaignId: saved.id,
-          limit: 200,
-          offset: 0,
-        }),
-      );
       await loadCampaigns();
     } catch (reason: unknown) {
       setError(readError(reason));
@@ -824,9 +670,7 @@ export function CampaignPage() {
                           className="secondary-button"
                           onClick={() => void openLogs(campaign)}
                         >
-                          {['running', 'paused'].includes(campaign.status)
-                            ? 'Canlı İzle'
-                            : 'Kampanya Detayı'}
+                          Sonuçlar
                         </button>
                       ) : null}
 
@@ -1101,63 +945,18 @@ export function CampaignPage() {
                         display: 'flex',
                         justifyContent: 'space-between',
                         alignItems: 'center',
-                        gap: 10,
                         marginBottom: 8,
                       }}>
                         <strong>Mesaj Kalıbı {index + 1}</strong>
-
-                        <div style={{
-                          display: 'flex',
-                          gap: 6,
-                          flexWrap: 'wrap',
-                          justifyContent: 'flex-end',
-                        }}>
+                        {(form.messageVariants?.length ?? 1) > 1 ? (
                           <button
                             type="button"
-                            className="secondary-button"
-                            onClick={() => moveMessageVariant(index, -1)}
-                            disabled={index === 0}
-                            style={{ padding: '6px 9px' }}
+                            className="danger-button"
+                            onClick={() => removeMessageVariant(index)}
                           >
-                            Yukarı
+                            Kaldır
                           </button>
-
-                          <button
-                            type="button"
-                            className="secondary-button"
-                            onClick={() => moveMessageVariant(index, 1)}
-                            disabled={
-                              index ===
-                              (form.messageVariants?.length ?? 1) - 1
-                            }
-                            style={{ padding: '6px 9px' }}
-                          >
-                            Aşağı
-                          </button>
-
-                          <button
-                            type="button"
-                            className="secondary-button"
-                            onClick={() => duplicateMessageVariant(index)}
-                            disabled={
-                              (form.messageVariants?.length ?? 1) >= 20
-                            }
-                            style={{ padding: '6px 9px' }}
-                          >
-                            Kopyala
-                          </button>
-
-                          {(form.messageVariants?.length ?? 1) > 1 ? (
-                            <button
-                              type="button"
-                              className="danger-button"
-                              onClick={() => removeMessageVariant(index)}
-                              style={{ padding: '6px 9px' }}
-                            >
-                              Kaldır
-                            </button>
-                          ) : null}
-                        </div>
+                        ) : null}
                       </div>
                       <textarea
                         value={variant}
@@ -1174,72 +973,6 @@ export function CampaignPage() {
                           background: '#091727', font: 'inherit',
                         }}
                       />
-                      <div style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        gap: 12,
-                        marginTop: 7,
-                        color:
-                          variant.length >= 3900
-                            ? '#ffb4c1'
-                            : '#7188a2',
-                        fontSize: 12,
-                      }}>
-                        <span>
-                          {variant.trim()
-                            ? 'Gönderime hazır'
-                            : 'Mesaj içeriği zorunludur'}
-                        </span>
-                        <span>{variant.length} / 4096 karakter</span>
-                      </div>
-
-                      <div style={{
-                        display: 'flex',
-                        flexWrap: 'wrap',
-                        gap: 6,
-                        marginTop: 10,
-                      }}>
-                        {MESSAGE_VARIABLES.map((variable) => (
-                          <button
-                            key={variable.token}
-                            type="button"
-                            className="secondary-button"
-                            onClick={() =>
-                              insertMessageVariable(index, variable.token)
-                            }
-                            style={{ padding: '6px 9px' }}
-                          >
-                            {variable.token} · {variable.label}
-                          </button>
-                        ))}
-                      </div>
-
-                      <div style={{
-                        marginTop: 10,
-                        padding: 12,
-                        border: '1px dashed #31506f',
-                        borderRadius: 10,
-                        background: '#0a192a',
-                      }}>
-                        <strong style={{
-                          display: 'block',
-                          marginBottom: 6,
-                          color: '#76e9d4',
-                          fontSize: 12,
-                        }}>
-                          Örnek Önizleme
-                        </strong>
-                        <div style={{
-                          whiteSpace: 'pre-wrap',
-                          color: '#c5d5e5',
-                          lineHeight: 1.55,
-                          fontSize: 13,
-                        }}>
-                          {variant.trim()
-                            ? previewMessageVariant(variant)
-                            : 'Mesaj kalıbını yazdığınızda örnek önizleme burada görünür.'}
-                        </div>
-                      </div>
                     </div>
                   ))}
                 </div>
@@ -1695,24 +1428,8 @@ export function CampaignPage() {
               >
                 Hazır
               </button>
-              <button
-                type="button"
-                className="primary-button"
-                disabled={
-                  saving ||
-                  !form.accountId ||
-                  estimate <= 0
-                }
-                onClick={() => void saveAndStart()}
-              >
-                {saving ? 'İşleniyor...' : 'Kaydet ve Gönder'}
-              </button>
-              <button
-                type="submit"
-                className="secondary-button"
-                disabled={saving}
-              >
-                {saving ? 'Kaydediliyor...' : 'Yalnızca Kaydet'}
+              <button type="submit" className="primary-button" disabled={saving}>
+                {saving ? 'Kaydediliyor...' : 'Kaydet'}
               </button>
             </footer>
           </form>
@@ -1738,105 +1455,6 @@ export function CampaignPage() {
                 ×
               </button>
             </header>
-
-            {liveCampaign ? (
-              <section style={{
-                marginTop: 18,
-                padding: 14,
-                border: '1px solid #29415b',
-                borderRadius: 13,
-                background: '#081726',
-              }}>
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  gap: 12,
-                  alignItems: 'center',
-                  flexWrap: 'wrap',
-                }}>
-                  <div>
-                    <strong>Gönderim İlerlemesi</strong>
-                    <p style={{
-                      margin: '5px 0 0',
-                      color: '#7188a2',
-                      fontSize: 12,
-                    }}>
-                      Aktif kampanyalarda bilgiler otomatik yenilenir.
-                    </p>
-                  </div>
-                  <span
-                    className="status-badge"
-                    style={{ color: statusColor(liveCampaign.status) }}
-                  >
-                    {statusLabel(liveCampaign.status)}
-                  </span>
-                </div>
-
-                <div style={{
-                  display: 'grid',
-                  gridTemplateColumns:
-                    'repeat(auto-fit, minmax(120px, 1fr))',
-                  gap: 9,
-                  marginTop: 12,
-                }}>
-                  {[
-                    ['Toplam', liveCampaign.totalRecipients],
-                    ['Gönderildi', liveCampaign.sentCount],
-                    ['Başarısız', liveCampaign.failedCount],
-                    ['Bekliyor', liveCampaign.pendingCount],
-                    ['Kalıp', liveCampaign.messageVariants?.length ?? 1],
-                  ].map(([label, value]) => (
-                    <div
-                      key={String(label)}
-                      style={{
-                        padding: 10,
-                        border: '1px solid #243c55',
-                        borderRadius: 10,
-                        background: '#0a1c2e',
-                      }}
-                    >
-                      <span style={{
-                        display: 'block',
-                        color: '#7890aa',
-                        fontSize: 11,
-                      }}>
-                        {label}
-                      </span>
-                      <strong style={{
-                        display: 'block',
-                        marginTop: 4,
-                        fontSize: 20,
-                      }}>
-                        {value}
-                      </strong>
-                    </div>
-                  ))}
-                </div>
-
-                <div style={{
-                  height: 9,
-                  marginTop: 12,
-                  overflow: 'hidden',
-                  borderRadius: 999,
-                  background: '#13283d',
-                }}>
-                  <div style={{
-                    width: `${
-                      liveCampaign.totalRecipients > 0
-                        ? Math.round(
-                            ((liveCampaign.sentCount +
-                              liveCampaign.failedCount) /
-                              liveCampaign.totalRecipients) *
-                              100,
-                          )
-                        : 0
-                    }%`,
-                    height: '100%',
-                    background: '#55dbc4',
-                  }} />
-                </div>
-              </section>
-            ) : null}
 
             <div style={{ maxHeight: 520, overflow: 'auto', marginTop: 18 }}>
               <table style={{

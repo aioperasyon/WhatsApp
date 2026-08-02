@@ -1,0 +1,99 @@
+            {liveCampaign ? (
+              <section style={{
+                marginTop: 18,
+                padding: 14,
+                border: '1px solid #29415b',
+                borderRadius: 13,
+                background: '#081726',
+              }}>
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                }}>
+                  <div>
+                    <strong>Gönderim İlerlemesi</strong>
+                    <p style={{
+                      margin: '5px 0 0',
+                      color: '#7188a2',
+                      fontSize: 12,
+                    }}>
+                      Aktif kampanyalarda bilgiler otomatik yenilenir.
+                    </p>
+                  </div>
+                  <span
+                    className="status-badge"
+                    style={{ color: statusColor(liveCampaign.status) }}
+                  >
+                    {statusLabel(liveCampaign.status)}
+                  </span>
+                </div>
+
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns:
+                    'repeat(auto-fit, minmax(120px, 1fr))',
+                  gap: 9,
+                  marginTop: 12,
+                }}>
+                  {[
+                    ['Toplam', liveCampaign.totalRecipients],
+                    ['Gönderildi', liveCampaign.sentCount],
+                    ['Başarısız', liveCampaign.failedCount],
+                    ['Bekliyor', liveCampaign.pendingCount],
+                    ['Kalıp', liveCampaign.messageVariants?.length ?? 1],
+                  ].map(([label, value]) => (
+                    <div
+                      key={String(label)}
+                      style={{
+                        padding: 10,
+                        border: '1px solid #243c55',
+                        borderRadius: 10,
+                        background: '#0a1c2e',
+                      }}
+                    >
+                      <span style={{
+                        display: 'block',
+                        color: '#7890aa',
+                        fontSize: 11,
+                      }}>
+                        {label}
+                      </span>
+                      <strong style={{
+                        display: 'block',
+                        marginTop: 4,
+                        fontSize: 20,
+                      }}>
+                        {value}
+                      </strong>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{
+                  height: 9,
+                  marginTop: 12,
+                  overflow: 'hidden',
+                  borderRadius: 999,
+                  background: '#13283d',
+                }}>
+                  <div style={{
+                    width: `${
+                      liveCampaign.totalRecipients > 0
+                        ? Math.round(
+                            ((liveCampaign.sentCount +
+                              liveCampaign.failedCount) /
+                              liveCampaign.totalRecipients) *
+                              100,
+                          )
+                        : 0
+                    }%`,
+                    height: '100%',
+                    background: '#55dbc4',
+                  }} />
+                </div>
+              </section>
+            ) : null}
+

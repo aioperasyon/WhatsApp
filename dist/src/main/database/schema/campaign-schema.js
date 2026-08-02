@@ -1,5 +1,3 @@
-import type Database from 'better-sqlite3';
-
 export const CAMPAIGN_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS campaigns (
   id TEXT PRIMARY KEY,
@@ -82,35 +80,25 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_active_status
   ON campaigns(status, updated_at)
   WHERE status IN ('running', 'paused', 'scheduled');
 `;
-
-export function ensureCampaignDatabaseSchema(
-  database: Database.Database,
-): void {
-  database.exec(CAMPAIGN_SCHEMA_SQL);
-
-  const campaignColumns = database
-    .prepare('PRAGMA table_info(campaigns)')
-    .all() as Array<{ name: string }>;
-
-  const existing = new Set(
-    campaignColumns.map((column) => column.name),
-  );
-
-  const additions: Array<[string, string]> = [
-    ['message_variants_json', "TEXT NOT NULL DEFAULT '[]'"],
-    ['total_recipients', 'INTEGER NOT NULL DEFAULT 0'],
-    ['sent_count', 'INTEGER NOT NULL DEFAULT 0'],
-    ['failed_count', 'INTEGER NOT NULL DEFAULT 0'],
-    ['pending_count', 'INTEGER NOT NULL DEFAULT 0'],
-    ['started_at', 'TEXT'],
-    ['completed_at', 'TEXT'],
-  ];
-
-  for (const [name, definition] of additions) {
-    if (!existing.has(name)) {
-      database.exec(
-        `ALTER TABLE campaigns ADD COLUMN ${name} ${definition}`,
-      );
+export function ensureCampaignDatabaseSchema(database) {
+    database.exec(CAMPAIGN_SCHEMA_SQL);
+    const campaignColumns = database
+        .prepare('PRAGMA table_info(campaigns)')
+        .all();
+    const existing = new Set(campaignColumns.map((column) => column.name));
+    const additions = [
+        ['message_variants_json', "TEXT NOT NULL DEFAULT '[]'"],
+        ['total_recipients', 'INTEGER NOT NULL DEFAULT 0'],
+        ['sent_count', 'INTEGER NOT NULL DEFAULT 0'],
+        ['failed_count', 'INTEGER NOT NULL DEFAULT 0'],
+        ['pending_count', 'INTEGER NOT NULL DEFAULT 0'],
+        ['started_at', 'TEXT'],
+        ['completed_at', 'TEXT'],
+    ];
+    for (const [name, definition] of additions) {
+        if (!existing.has(name)) {
+            database.exec(`ALTER TABLE campaigns ADD COLUMN ${name} ${definition}`);
+        }
     }
-  }
 }
+//# sourceMappingURL=campaign-schema.js.map

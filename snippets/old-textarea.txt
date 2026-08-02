@@ -1,0 +1,22 @@
+              <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+                <label>Mesaj</label>
+                <textarea
+                  value={form.message}
+                  onChange={(event) => {
+                    setSelectedTemplateId('');
+                    setForm((current) => ({
+                      ...current,
+                      message: event.target.value,
+                    }));
+                  }}
+                  rows={7}
+                  maxLength={4096}
+                  required
+                  style={{
+                    width: '100%', padding: 14,
+                    border: '1px solid #314a68', borderRadius: 11,
+                    resize: 'vertical', color: '#fff',
+                    background: '#091727', font: 'inherit',
+                  }}
+                />
+              </div>

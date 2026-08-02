@@ -27,9 +27,6 @@ import {
 import {
   sendCampaignMessage,
 } from '../whatsapp-connection.service.js';
-import {
-  selectCampaignMessageVariant,
-} from './campaign-message-variant-selector.service.js';
 
 export interface CampaignRecipientProcessResult {
   recipientClaimed: boolean;
@@ -87,10 +84,7 @@ export async function processCampaignRecipient(input: {
       const result = await sendCampaignMessage({
         accountId: campaign.accountId!,
         phoneNumber: recipient.phone_number,
-        text: selectCampaignMessageVariant({
-          campaign,
-          recipientId: recipient.id,
-        }),
+        text: campaign.message,
         typingSimulation:
           campaign.settings.typingSimulation,
       });

@@ -1,0 +1,70 @@
+              <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 12,
+                }}>
+                  <div>
+                    <label>Mesaj Kalıpları</label>
+                    <small style={{ color: '#7188a2' }}>
+                      En fazla 20 kalıp ekleyebilirsiniz. Gönderimde sırayla kullanılacaktır.
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={addMessageVariant}
+                    disabled={(form.messageVariants?.length ?? 1) >= 20}
+                  >
+                    Kalıp Ekle ({form.messageVariants?.length ?? 1}/20)
+                  </button>
+                </div>
+
+                <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
+                  {(form.messageVariants ?? [form.message]).map((variant, index) => (
+                    <div
+                      key={index}
+                      style={{
+                        padding: 12,
+                        border: '1px solid #29415b',
+                        borderRadius: 12,
+                        background: '#081522',
+                      }}
+                    >
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: 8,
+                      }}>
+                        <strong>Mesaj Kalıbı {index + 1}</strong>
+                        {(form.messageVariants?.length ?? 1) > 1 ? (
+                          <button
+                            type="button"
+                            className="danger-button"
+                            onClick={() => removeMessageVariant(index)}
+                          >
+                            Kaldır
+                          </button>
+                        ) : null}
+                      </div>
+                      <textarea
+                        value={variant}
+                        onChange={(event) =>
+                          updateMessageVariant(index, event.target.value)
+                        }
+                        rows={5}
+                        maxLength={4096}
+                        required
+                        style={{
+                          width: '100%', padding: 14,
+                          border: '1px solid #314a68', borderRadius: 11,
+                          resize: 'vertical', color: '#fff',
+                          background: '#091727', font: 'inherit',
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>

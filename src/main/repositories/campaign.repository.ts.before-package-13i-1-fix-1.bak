@@ -17,7 +17,6 @@ interface CampaignRow {
   account_id: string | null;
   account_name: string | null;
   message: string;
-  message_variants_json: string;
   sectors_json: string;
   cities_json: string;
   only_allowed: number;
@@ -75,10 +74,6 @@ function mapCampaign(row: CampaignRow): Campaign {
     accountId: row.account_id,
     accountName: row.account_name,
     message: row.message,
-    messageVariants: (() => {
-      const variants = parseValues(row.message_variants_json);
-      return variants.length > 0 ? variants : [row.message];
-    })(),
     sectors: parseValues(row.sectors_json),
     cities: parseValues(row.cities_json),
     onlyAllowed: row.only_allowed === 1,
@@ -260,22 +255,7 @@ export function saveCampaign(
   input: CampaignSaveInput,
 ): Campaign {
   const name = input.name?.trim() ?? '';
-  const requestedMessageVariants = Array.from(
-    new Set(
-      (input.messageVariants ?? [])
-        .map((value) => value.trim())
-        .filter(Boolean),
-    ),
-  ).slice(0, 20);
-
-  const fallbackMessage = input.message?.trim() ?? '';
-  const messageVariants =
-    requestedMessageVariants.length > 0
-      ? requestedMessageVariants
-      : fallbackMessage
-        ? [fallbackMessage]
-        : [];
-  const message = messageVariants[0] ?? '';
+  const message = input.message?.trim() ?? '';
   const accountId = input.accountId?.trim() || null;
   const sectors = normalizeValues(input.sectors);
   const cities = normalizeValues(input.cities);
@@ -346,13 +326,9 @@ export function saveCampaign(
     throw new Error('Kampanya mesajı zorunludur.');
   }
 
-  if (
-    messageVariants.some(
-      (variant) => variant.length > 4096,
-    )
-  ) {
+  if (message.length > 4096) {
     throw new Error(
-      'Her kampanya mesajı en fazla 4096 karakter olabilir.',
+      'Kampanya mesajı en fazla 4096 karakter olabilir.',
     );
   }
 
@@ -405,7 +381,6 @@ export function saveCampaign(
           name = ?,
           account_id = ?,
           message = ?,
-          message_variants_json = ?,
           sectors_json = ?,
           cities_json = ?,
           only_allowed = ?,
@@ -423,7 +398,6 @@ export function saveCampaign(
         name,
         accountId,
         message,
-        JSON.stringify(messageVariants),
         JSON.stringify(sectors),
         JSON.stringify(cities),
         onlyAllowed ? 1 : 0,
@@ -439,7 +413,6 @@ export function saveCampaign(
           name,
           account_id,
           message,
-          message_variants_json,
           sectors_json,
           cities_json,
           only_allowed,
@@ -454,7 +427,7 @@ export function saveCampaign(
           created_at,
           updated_at
         ) VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?,
           0, 0, 0, 0, NULL, NULL, ?, ?
         )
       `).run(
@@ -462,7 +435,6 @@ export function saveCampaign(
         name,
         accountId,
         message,
-        JSON.stringify(messageVariants),
         JSON.stringify(sectors),
         JSON.stringify(cities),
         onlyAllowed ? 1 : 0,

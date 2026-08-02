@@ -4,7 +4,7 @@ import {
   ensureCampaignDatabaseSchema,
 } from '../schema/campaign-schema.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 2;
 
 export function runDatabaseMigrations(database: Database.Database): void {
   const currentVersion = database.pragma('user_version', {
@@ -21,10 +21,6 @@ export function runDatabaseMigrations(database: Database.Database): void {
     }
 
     if (currentVersion < 2) {
-      ensureCampaignDatabaseSchema(database);
-    }
-
-    if (currentVersion < 3) {
       ensureCampaignDatabaseSchema(database);
     }
 
