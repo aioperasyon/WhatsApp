@@ -63,10 +63,6 @@ import {
   getCampaignMaximumAttempts,
   getCampaignRetryWaitSeconds,
 } from './campaign/campaign-delivery-policy.service.js';
-import {
-  formatCampaignRetryError,
-  getCampaignErrorMessage,
-} from './campaign/campaign-error-policy.service.js';
 import { sendCampaignMessage } from './whatsapp-connection.service.js';
 export { listCampaignRecipients } from '../repositories/campaign-recipient.repository.js';
 
@@ -289,10 +285,9 @@ async function runQueue(
           break;
         } catch (reason: unknown) {
           lastErrorMessage =
-            getCampaignErrorMessage(
-              reason,
-              'Bilinmeyen gönderim hatası.',
-            );
+            reason instanceof Error
+              ? reason.message
+              : 'Bilinmeyen gönderim hatası.';
 
           const hasAnotherAttempt =
             currentAttempt < maximumAttempts;
@@ -309,11 +304,7 @@ async function runQueue(
           markCampaignRecipientPending(
             recipient.id,
             new Date().toISOString(),
-            formatCampaignRetryError(
-              currentAttempt,
-              maximumAttempts,
-              lastErrorMessage,
-            ),
+            `Tekrar denenecek (${currentAttempt}/${maximumAttempts - 1}): ${lastErrorMessage}`,
           );
 
           const retryWaitSeconds =
@@ -370,10 +361,9 @@ async function runQueue(
     }
   } catch (reason: unknown) {
     const message =
-      getCampaignErrorMessage(
-        reason,
-        'Kampanya kuyruğu çalıştırılamadı.',
-      );
+      reason instanceof Error
+        ? reason.message
+        : 'Kampanya kuyruğu çalıştırılamadı.';
 
     failCampaignRecord(campaignId);
 
@@ -396,10 +386,9 @@ async function runQueue(
       reconcileCampaignState(campaignId);
     } catch (reason: unknown) {
       const message =
-        getCampaignErrorMessage(
-          reason,
-          'Kampanya durumu uzlaştırılamadı.',
-        );
+        reason instanceof Error
+          ? reason.message
+          : 'Kampanya durumu uzlaştırılamadı.';
 
       console.error(
         `[Campaign Queue] ${campaignId}: ${message}`,
@@ -413,10 +402,9 @@ async function runQueue(
         removeFinishedRuntimeState(campaignId, state);
       } catch (reason: unknown) {
         const message =
-          getCampaignErrorMessage(
-            reason,
-            'Runtime durumu temizlenemedi.',
-          );
+          reason instanceof Error
+            ? reason.message
+            : 'Runtime durumu temizlenemedi.';
 
         console.error(
           `[Campaign Queue] ${campaignId}: ${message}`,

@@ -53,20 +53,6 @@ import {
 import {
   readCampaign,
 } from './campaign/campaign-reader.service.js';
-import {
-  getStartableCampaignStatuses,
-  isStartableCampaignStatus,
-  isTerminalCampaignStatus,
-} from './campaign/campaign-status-policy.service.js';
-import {
-  getCampaignBatchSize,
-  getCampaignMaximumAttempts,
-  getCampaignRetryWaitSeconds,
-} from './campaign/campaign-delivery-policy.service.js';
-import {
-  formatCampaignRetryError,
-  getCampaignErrorMessage,
-} from './campaign/campaign-error-policy.service.js';
 import { sendCampaignMessage } from './whatsapp-connection.service.js';
 export { listCampaignRecipients } from '../repositories/campaign-recipient.repository.js';
 
@@ -91,7 +77,9 @@ function removeFinishedRuntimeState(
 
   if (
     status === null ||
-    isTerminalCampaignStatus(status as CampaignStatus)
+    status === 'completed' ||
+    status === 'cancelled' ||
+    status === 'failed'
   ) {
     state.wakeWait = undefined;
     runtimeStates.delete(campaignId);
@@ -135,9 +123,9 @@ async function runQueue(
         if (persistedCampaign.status === 'running') {
           state.paused = false;
         } else if (
-          isTerminalCampaignStatus(
-            persistedCampaign.status,
-          )
+          persistedCampaign.status === 'cancelled' ||
+          persistedCampaign.status === 'completed' ||
+          persistedCampaign.status === 'failed'
         ) {
           state.cancelled =
             persistedCampaign.status === 'cancelled';
@@ -159,9 +147,9 @@ async function runQueue(
       }
 
       if (
-        isTerminalCampaignStatus(
-          campaign.status,
-        )
+        campaign.status === 'cancelled' ||
+        campaign.status === 'completed' ||
+        campaign.status === 'failed'
       ) {
         state.cancelled =
           campaign.status === 'cancelled';
@@ -227,10 +215,10 @@ async function runQueue(
         return;
       }
 
-      const maximumAttempts =
-        getCampaignMaximumAttempts(
-          campaign.settings.retryCount,
-        );
+      const maximumAttempts = 1 + Math.max(
+        0,
+        campaign.settings.retryCount,
+      );
       let sentSuccessfully = false;
       let recipientClaimed = false;
       let lastErrorMessage: string | null = null;
@@ -289,10 +277,9 @@ async function runQueue(
           break;
         } catch (reason: unknown) {
           lastErrorMessage =
-            getCampaignErrorMessage(
-              reason,
-              'Bilinmeyen gönderim hatası.',
-            );
+            reason instanceof Error
+              ? reason.message
+              : 'Bilinmeyen gönderim hatası.';
 
           const hasAnotherAttempt =
             currentAttempt < maximumAttempts;
@@ -309,17 +296,13 @@ async function runQueue(
           markCampaignRecipientPending(
             recipient.id,
             new Date().toISOString(),
-            formatCampaignRetryError(
-              currentAttempt,
-              maximumAttempts,
-              lastErrorMessage,
-            ),
+            `Tekrar denenecek (${currentAttempt}/${maximumAttempts - 1}): ${lastErrorMessage}`,
           );
 
-          const retryWaitSeconds =
-            getCampaignRetryWaitSeconds(
-              currentAttempt,
-            );
+          const retryWaitSeconds = Math.min(
+            30,
+            Math.max(3, currentAttempt * 5),
+          );
           const continued = await waitForCampaignRuntime(
             state,
             retryWaitSeconds * 1000,
@@ -349,9 +332,7 @@ async function runQueue(
         sentSinceBatchPause += 1;
       }
 
-      const batchSize = getCampaignBatchSize(
-        campaign.settings.batchSize,
-      );
+      const batchSize = Math.max(1, campaign.settings.batchSize);
       if (sentSinceBatchPause >= batchSize) {
         sentSinceBatchPause = 0;
         const batchPauseSeconds = randomCampaignInteger(
@@ -370,10 +351,9 @@ async function runQueue(
     }
   } catch (reason: unknown) {
     const message =
-      getCampaignErrorMessage(
-        reason,
-        'Kampanya kuyruğu çalıştırılamadı.',
-      );
+      reason instanceof Error
+        ? reason.message
+        : 'Kampanya kuyruğu çalıştırılamadı.';
 
     failCampaignRecord(campaignId);
 
@@ -396,10 +376,9 @@ async function runQueue(
       reconcileCampaignState(campaignId);
     } catch (reason: unknown) {
       const message =
-        getCampaignErrorMessage(
-          reason,
-          'Kampanya durumu uzlaştırılamadı.',
-        );
+        reason instanceof Error
+          ? reason.message
+          : 'Kampanya durumu uzlaştırılamadı.';
 
       console.error(
         `[Campaign Queue] ${campaignId}: ${message}`,
@@ -413,10 +392,9 @@ async function runQueue(
         removeFinishedRuntimeState(campaignId, state);
       } catch (reason: unknown) {
         const message =
-          getCampaignErrorMessage(
-            reason,
-            'Runtime durumu temizlenemedi.',
-          );
+          reason instanceof Error
+            ? reason.message
+            : 'Runtime durumu temizlenemedi.';
 
         console.error(
           `[Campaign Queue] ${campaignId}: ${message}`,
@@ -449,10 +427,14 @@ export function startCampaign(
     throw new Error('Bu kampanya kuyruğu zaten çalışıyor.');
   }
 
-  const startableStatuses =
-    getStartableCampaignStatuses();
+  const startableStatuses: readonly CampaignStatus[] = [
+    'ready',
+    'scheduled',
+    'paused',
+    'failed',
+  ];
 
-  if (!isStartableCampaignStatus(campaign.status)) {
+  if (!startableStatuses.includes(campaign.status)) {
     throw new Error(
       'Bu kampanya mevcut durumunda başlatılamaz.',
     );
