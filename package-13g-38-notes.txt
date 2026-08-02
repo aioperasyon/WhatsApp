@@ -1,0 +1,13 @@
+AI Operasyon — Paket 13G-38
+Campaign Runtime Sweeper Service
+
+Yeni kaynak:
+- src/main/services/campaign/campaign-runtime-sweeper.service.ts
+
+Taşınanlar:
+- Bitmiş runtime kayıtlarını tarama
+- Terminal runtime state temizliği
+- Runtime cleanup hata yönetimi
+
+13G-37 uygulanmış kaynak üzerine kurulmalıdır.
+Geçici paket dosyalarını GitHub'a yüklemeyin.

@@ -1,0 +1,12 @@
+AI Operasyon — Paket 13G-41
+Campaign Scheduler Dependencies Service
+
+Yeni kaynak:
+- src/main/services/campaign/campaign-scheduler-dependencies.service.ts
+
+Taşınanlar:
+- Scheduler dependency nesnesi üretimi
+- Scheduler dependency tip güvenliği
+
+13G-40-FIX-1 uygulanmış kaynak üzerine kurulmalıdır.
+Geçici paket dosyalarını GitHub'a yüklemeyin.

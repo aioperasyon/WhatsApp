@@ -1,0 +1,14 @@
+AI Operasyon — Paket 13G-37
+Campaign Runtime Shutdown Service
+
+Yeni kaynak:
+- src/main/services/campaign/campaign-runtime-shutdown.service.ts
+
+Taşınanlar:
+- Tüm runtime'ları pause etme
+- Worker kapanışını timeout ile bekleme
+- Devam eden campaign id listesini çıkarma
+- Runtime state reset ve clear işlemi
+
+13G-36 uygulanmış kaynak üzerine kurulmalıdır.
+Geçici paket dosyalarını GitHub'a yüklemeyin.

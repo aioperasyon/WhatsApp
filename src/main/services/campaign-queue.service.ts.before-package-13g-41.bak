@@ -26,12 +26,6 @@ import {
   resumeCampaignLifecycle,
   startCampaignLifecycle,
 } from './campaign/campaign-lifecycle.service.js';
-import {
-  createCampaignSchedulerDependencies,
-} from './campaign/campaign-scheduler-dependencies.service.js';
-import {
-  createCampaignLifecycleDependencies,
-} from './campaign/campaign-lifecycle-dependencies.service.js';
 import type {
   CampaignRuntimeState,
 } from './campaign/campaign-runtime-state.service.js';
@@ -54,12 +48,11 @@ async function runQueue(
 }
 
 function getCampaignLifecycleDependencies() {
-  return createCampaignLifecycleDependencies({
+  return {
     runtimeStates,
-    isShuttingDown: () =>
-      campaignEngineShuttingDown,
+    isShuttingDown: () => campaignEngineShuttingDown,
     runQueue,
-  });
+  };
 }
 
 export function startCampaign(campaignId: string): CampaignActionResult {
@@ -79,13 +72,13 @@ export function cancelCampaign(campaignId: string): CampaignActionResult {
 }
 
 function getCampaignSchedulerDependencies() {
-  return createCampaignSchedulerDependencies({
+  return {
     isShuttingDown: () =>
       campaignEngineShuttingDown,
     startCampaign,
     clearFinishedRuntimeStates:
       clearFinishedCampaignRuntimeStates,
-  });
+  };
 }
 
 export async function processScheduledCampaigns(): Promise<void> {
