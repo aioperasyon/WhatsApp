@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell } from 'electron';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { closeDatabase } from './database/database.js';
 import { registerCoreIpcHandlers } from './ipc/register-core-ipc.js';
@@ -19,6 +20,24 @@ import { closeAllWhatsAppConnections } from './services/whatsapp-connection.serv
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDirectory = path.dirname(currentFile);
+
+const applicationUserDataDirectory =
+  app.getPath('userData');
+
+const electronCacheDirectory = path.join(
+  applicationUserDataDirectory,
+  'electron-cache',
+);
+
+fs.mkdirSync(
+  electronCacheDirectory,
+  { recursive: true },
+);
+
+app.commandLine.appendSwitch(
+  'disk-cache-dir',
+  electronCacheDirectory,
+);
 
 let mainWindow: BrowserWindow | null = null;
 let applicationShuttingDown = false;

@@ -1,7 +1,7 @@
 import { dialog, ipcMain } from 'electron';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import * as XLSX from 'xlsx';
+import XLSX from 'xlsx';
 import type {
   CrmContact,
   CrmContactDeleteRequest,
