@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type {
   CampaignActionResult,
   CampaignStatus,
@@ -67,24 +66,22 @@ import {
   formatCampaignRetryError,
   getCampaignErrorMessage,
 } from './campaign/campaign-error-policy.service.js';
+import {
+  createCampaignRuntimeState,
+  prepareCampaignRuntimeState,
+  type CampaignRuntimeState,
+} from './campaign/campaign-runtime-state.service.js';
 import { sendCampaignMessage } from './whatsapp-connection.service.js';
 export { listCampaignRecipients } from '../repositories/campaign-recipient.repository.js';
 
-interface RuntimeState {
-  cancelled: boolean;
-  paused: boolean;
-  running: boolean;
-  runId: string;
-  wakeWait?: () => void;
-}
-
-const runtimeStates = new Map<string, RuntimeState>();
+const runtimeStates =
+  new Map<string, CampaignRuntimeState>();
 
 let campaignEngineShuttingDown = false;
 
 function removeFinishedRuntimeState(
   campaignId: string,
-  state: RuntimeState,
+  state: CampaignRuntimeState,
 ): void {
   const status =
     getCampaignStatus(campaignId);
@@ -482,19 +479,9 @@ export function startCampaign(
   }
 
   const existingState = runtimeStates.get(campaignId);
-  const state: RuntimeState =
-    existingState && !existingState.running
-      ? existingState
-      : {
-          cancelled: false,
-          paused: false,
-          running: false,
-          runId: randomUUID(),
-        };
-
-  state.cancelled = false;
-  state.paused = false;
-  state.runId = randomUUID();
+  const state = prepareCampaignRuntimeState(
+    existingState,
+  );
   runtimeStates.set(campaignId, state);
 
   void runQueue(campaignId, state.runId);
@@ -516,12 +503,7 @@ export function pauseCampaign(
 
   const state =
     runtimeStates.get(campaignId) ??
-    {
-      cancelled: false,
-      paused: false,
-      running: false,
-      runId: randomUUID(),
-    };
+    createCampaignRuntimeState();
 
   state.paused = true;
   runtimeStates.set(campaignId, state);
@@ -551,19 +533,9 @@ export function resumeCampaign(
   }
 
   const existingState = runtimeStates.get(campaignId);
-  const state: RuntimeState =
-    existingState && !existingState.running
-      ? existingState
-      : {
-          cancelled: false,
-          paused: false,
-          running: false,
-          runId: randomUUID(),
-        };
-
-  state.cancelled = false;
-  state.paused = false;
-  state.runId = randomUUID();
+  const state = prepareCampaignRuntimeState(
+    existingState,
+  );
   wakeCampaignRuntime(state);
   runtimeStates.set(campaignId, state);
 
@@ -596,12 +568,7 @@ export function cancelCampaign(
 
   const state =
     runtimeStates.get(campaignId) ??
-    {
-      cancelled: false,
-      paused: false,
-      running: false,
-      runId: randomUUID(),
-    };
+    createCampaignRuntimeState();
 
   state.cancelled = true;
   state.paused = false;
