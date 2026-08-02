@@ -21,8 +21,12 @@ import {
   seedCampaignRecipients,
 } from '../repositories/campaign-recipient-queue.repository.js';
 import {
+  claimCampaignRecipient,
   countPendingCampaignRecipients,
   findNextPendingCampaignRecipient,
+  markCampaignRecipientFailed,
+  markCampaignRecipientPending,
+  markCampaignRecipientSent,
 } from '../repositories/campaign-recipient-lifecycle.repository.js';
 import {
   millisecondsUntilCampaignWorkingWindow,
@@ -55,8 +59,11 @@ import {
 } from './campaign/campaign-status-policy.service.js';
 import {
   getCampaignBatchSize,
+  getCampaignMaximumAttempts,
+  getCampaignRetryWaitSeconds,
 } from './campaign/campaign-delivery-policy.service.js';
 import {
+  formatCampaignRetryError,
   getCampaignErrorMessage,
 } from './campaign/campaign-error-policy.service.js';
 import {
@@ -64,22 +71,29 @@ import {
   prepareCampaignRuntimeState,
   type CampaignRuntimeState,
 } from './campaign/campaign-runtime-state.service.js';
-import {
-  processCampaignRecipient,
-} from './campaign/campaign-recipient-processor.service.js';
-import {
-  canStartCampaignRuntime,
-  ownsCampaignRuntime,
-} from './campaign/campaign-runtime-guard.service.js';
-import {
-  removeFinishedCampaignRuntimeState,
-} from './campaign/campaign-runtime-cleanup.service.js';
+import { sendCampaignMessage } from './whatsapp-connection.service.js';
 export { listCampaignRecipients } from '../repositories/campaign-recipient.repository.js';
 
 const runtimeStates =
   new Map<string, CampaignRuntimeState>();
 
 let campaignEngineShuttingDown = false;
+
+function removeFinishedRuntimeState(
+  campaignId: string,
+  state: CampaignRuntimeState,
+): void {
+  const status =
+    getCampaignStatus(campaignId);
+
+  if (
+    status === null ||
+    isTerminalCampaignStatus(status as CampaignStatus)
+  ) {
+    state.wakeWait = undefined;
+    runtimeStates.delete(campaignId);
+  }
+}
 
 async function runQueue(
   campaignId: string,
@@ -88,10 +102,9 @@ async function runQueue(
   const state = runtimeStates.get(campaignId);
 
   if (
-    !canStartCampaignRuntime(
-      state,
-      expectedRunId,
-    )
+    !state ||
+    state.running ||
+    state.runId !== expectedRunId
   ) {
     return;
   }
@@ -104,11 +117,8 @@ async function runQueue(
       const currentState = runtimeStates.get(campaignId);
 
       if (
-        !ownsCampaignRuntime(
-          currentState,
-          state,
-          expectedRunId,
-        )
+        currentState !== state ||
+        state.runId !== expectedRunId
       ) {
         console.warn(
           `[Campaign Queue] ${campaignId}: Runtime sahipliği değiştiği için eski worker sonlandırıldı.`,
@@ -214,14 +224,113 @@ async function runQueue(
         return;
       }
 
-      const {
-        recipientClaimed,
-        sentSuccessfully,
-      } = await processCampaignRecipient({
-        campaign,
-        recipient,
-        state,
-      });
+      const maximumAttempts =
+        getCampaignMaximumAttempts(
+          campaign.settings.retryCount,
+        );
+      let sentSuccessfully = false;
+      let recipientClaimed = false;
+      let lastErrorMessage: string | null = null;
+
+      for (
+        let currentAttempt = 1;
+        currentAttempt <= maximumAttempts;
+        currentAttempt += 1
+      ) {
+        if (state.cancelled || state.paused) {
+          markCampaignRecipientPending(
+            recipient.id,
+            new Date().toISOString(),
+          );
+          break;
+        }
+
+        const attemptStartedAt = new Date().toISOString();
+        const recipientClaimSucceeded =
+          claimCampaignRecipient(
+            recipient.id,
+            attemptStartedAt,
+          );
+
+        if (!recipientClaimSucceeded) {
+          console.warn(
+            `[Campaign Queue] ${campaignId}: Alıcı başka bir işlem tarafından alınmış olabilir: ${recipient.id}`,
+          );
+          break;
+        }
+
+        recipientClaimed = true;
+        refreshCampaignRecipientCounts(campaignId);
+
+        try {
+          const result = await sendCampaignMessage({
+            accountId: campaign.accountId,
+            phoneNumber: recipient.phone_number,
+            text: campaign.message,
+            typingSimulation:
+              campaign.settings.typingSimulation,
+          });
+
+          const sentAt =
+            result.sentAt ?? new Date().toISOString();
+
+          markCampaignRecipientSent({
+            recipientId: recipient.id,
+            whatsappMessageId:
+              result.whatsappMessageId,
+            sentAt,
+          });
+
+          sentSuccessfully = true;
+          lastErrorMessage = null;
+          break;
+        } catch (reason: unknown) {
+          lastErrorMessage =
+            getCampaignErrorMessage(
+              reason,
+              'Bilinmeyen gönderim hatası.',
+            );
+
+          const hasAnotherAttempt =
+            currentAttempt < maximumAttempts;
+
+          if (!hasAnotherAttempt) {
+            markCampaignRecipientFailed(
+              recipient.id,
+              lastErrorMessage,
+              new Date().toISOString(),
+            );
+            break;
+          }
+
+          markCampaignRecipientPending(
+            recipient.id,
+            new Date().toISOString(),
+            formatCampaignRetryError(
+              currentAttempt,
+              maximumAttempts,
+              lastErrorMessage,
+            ),
+          );
+
+          const retryWaitSeconds =
+            getCampaignRetryWaitSeconds(
+              currentAttempt,
+            );
+          const continued = await waitForCampaignRuntime(
+            state,
+            retryWaitSeconds * 1000,
+          );
+
+          if (!continued) {
+            markCampaignRecipientPending(
+              recipient.id,
+              new Date().toISOString(),
+            );
+            break;
+          }
+        }
+      }
 
       refreshCampaignRecipientCounts(campaignId);
 
@@ -270,11 +379,8 @@ async function runQueue(
     );
   } finally {
     const ownsRuntime =
-      ownsCampaignRuntime(
-        runtimeStates.get(campaignId),
-        state,
-        expectedRunId,
-      );
+      runtimeStates.get(campaignId) === state &&
+      state.runId === expectedRunId;
 
     if (!ownsRuntime) {
       return;
@@ -301,13 +407,7 @@ async function runQueue(
       runtimeStates.delete(campaignId);
     } else {
       try {
-        removeFinishedCampaignRuntimeState({
-          campaignId,
-          state,
-          getStatus: getCampaignStatus,
-          deleteState: (id) =>
-            runtimeStates.delete(id),
-        });
+        removeFinishedRuntimeState(campaignId, state);
       } catch (reason: unknown) {
         const message =
           getCampaignErrorMessage(
@@ -525,13 +625,7 @@ export function clearFinishedCampaignRuntimeStates(): void {
     }
 
     try {
-      removeFinishedCampaignRuntimeState({
-        campaignId,
-        state,
-        getStatus: getCampaignStatus,
-        deleteState: (id) =>
-          runtimeStates.delete(id),
-      });
+      removeFinishedRuntimeState(campaignId, state);
     } catch (reason: unknown) {
       const message =
         reason instanceof Error

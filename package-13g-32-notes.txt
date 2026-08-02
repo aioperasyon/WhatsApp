@@ -1,0 +1,13 @@
+AI Operasyon — Paket 13G-32
+Campaign Runtime Guard Service
+
+Yeni kaynak:
+- src/main/services/campaign/campaign-runtime-guard.service.ts
+
+Taşınanlar:
+- Worker başlangıç runtime doğrulaması
+- Runtime ownership kontrolü
+- Finalization ownership kontrolü
+
+13G-31-FIX-1 uygulanmış kaynak üzerine kurulmalıdır.
+Geçici paket dosyalarını GitHub'a yüklemeyin.

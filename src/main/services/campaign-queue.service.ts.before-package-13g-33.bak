@@ -71,15 +71,28 @@ import {
   canStartCampaignRuntime,
   ownsCampaignRuntime,
 } from './campaign/campaign-runtime-guard.service.js';
-import {
-  removeFinishedCampaignRuntimeState,
-} from './campaign/campaign-runtime-cleanup.service.js';
 export { listCampaignRecipients } from '../repositories/campaign-recipient.repository.js';
 
 const runtimeStates =
   new Map<string, CampaignRuntimeState>();
 
 let campaignEngineShuttingDown = false;
+
+function removeFinishedRuntimeState(
+  campaignId: string,
+  state: CampaignRuntimeState,
+): void {
+  const status =
+    getCampaignStatus(campaignId);
+
+  if (
+    status === null ||
+    isTerminalCampaignStatus(status as CampaignStatus)
+  ) {
+    state.wakeWait = undefined;
+    runtimeStates.delete(campaignId);
+  }
+}
 
 async function runQueue(
   campaignId: string,
@@ -301,13 +314,7 @@ async function runQueue(
       runtimeStates.delete(campaignId);
     } else {
       try {
-        removeFinishedCampaignRuntimeState({
-          campaignId,
-          state,
-          getStatus: getCampaignStatus,
-          deleteState: (id) =>
-            runtimeStates.delete(id),
-        });
+        removeFinishedRuntimeState(campaignId, state);
       } catch (reason: unknown) {
         const message =
           getCampaignErrorMessage(
@@ -525,13 +532,7 @@ export function clearFinishedCampaignRuntimeStates(): void {
     }
 
     try {
-      removeFinishedCampaignRuntimeState({
-        campaignId,
-        state,
-        getStatus: getCampaignStatus,
-        deleteState: (id) =>
-          runtimeStates.delete(id),
-      });
+      removeFinishedRuntimeState(campaignId, state);
     } catch (reason: unknown) {
       const message =
         reason instanceof Error
