@@ -16,6 +16,7 @@ import {
   reconcileCampaignState,
 } from '../repositories/campaign-state.repository.js';
 import {
+  countCampaignRecipientsSentToday,
   refreshCampaignRecipientCounts,
   seedCampaignRecipients,
 } from '../repositories/campaign-recipient-queue.repository.js';
@@ -23,6 +24,11 @@ import {
   countPendingCampaignRecipients,
   findNextPendingCampaignRecipient,
 } from '../repositories/campaign-recipient-lifecycle.repository.js';
+import {
+  millisecondsUntilCampaignWorkingWindow,
+  millisecondsUntilNextCampaignDay,
+  randomCampaignInteger,
+} from './campaign/campaign-timing.service.js';
 import {
   waitForCampaignRuntime,
   wakeCampaignRuntime,
@@ -48,6 +54,9 @@ import {
   isTerminalCampaignStatus,
 } from './campaign/campaign-status-policy.service.js';
 import {
+  getCampaignBatchSize,
+} from './campaign/campaign-delivery-policy.service.js';
+import {
   getCampaignErrorMessage,
 } from './campaign/campaign-error-policy.service.js';
 import {
@@ -65,12 +74,6 @@ import {
 import {
   removeFinishedCampaignRuntimeState,
 } from './campaign/campaign-runtime-cleanup.service.js';
-import {
-  getCampaignQueueGate,
-} from './campaign/campaign-queue-gate.service.js';
-import {
-  getCampaignPostSendDelay,
-} from './campaign/campaign-post-send-delay.service.js';
 export { listCampaignRecipients } from '../repositories/campaign-recipient.repository.js';
 
 const runtimeStates =
@@ -165,20 +168,40 @@ async function runQueue(
         );
       }
 
-      const queueGate =
-        getCampaignQueueGate(campaign);
+      const workingWait = millisecondsUntilCampaignWorkingWindow(
+        campaign.settings.workStartTime,
+        campaign.settings.workEndTime,
+      );
 
-      if (queueGate.type !== 'ready') {
-        const continued =
-          await waitForCampaignRuntime(
-            state,
-            queueGate.waitMs,
-          );
+      if (workingWait > 0) {
+        const continued = await waitForCampaignRuntime(state, workingWait);
 
         if (!continued) {
           continue;
         }
 
+        // Bekleme sırasında kampanya ayarları veya durumu değişmiş
+        // olabilir. Güncel kampanyayı yeniden okuyup tüm kontrolleri
+        // baştan çalıştırmak için döngünün başına dön.
+        continue;
+      }
+
+      const dailyLimit = campaign.settings.dailyLimit;
+      if (
+        dailyLimit !== null &&
+        dailyLimit > 0 &&
+        countCampaignRecipientsSentToday(campaignId) >= dailyLimit
+      ) {
+        const continued = await waitForCampaignRuntime(
+          state,
+          millisecondsUntilNextCampaignDay(),
+        );
+        if (!continued) {
+          continue;
+        }
+
+        // Yeni gün başladığında günlük sayaç, çalışma saati ve
+        // kampanya durumu güncel verilerle tekrar doğrulansın.
         continue;
       }
 
@@ -210,20 +233,28 @@ async function runQueue(
         continue;
       }
 
-      const postSendDelay =
-        getCampaignPostSendDelay({
-          campaign,
-          sentSuccessfully,
-          sentSinceBatchPause,
-        });
+      if (sentSuccessfully) {
+        sentSinceBatchPause += 1;
+      }
 
-      sentSinceBatchPause =
-        postSendDelay.sentSinceBatchPause;
-
-      await waitForCampaignRuntime(
-        state,
-        postSendDelay.waitMs,
+      const batchSize = getCampaignBatchSize(
+        campaign.settings.batchSize,
       );
+      if (sentSinceBatchPause >= batchSize) {
+        sentSinceBatchPause = 0;
+        const batchPauseSeconds = randomCampaignInteger(
+          campaign.settings.batchPauseMinSeconds,
+          campaign.settings.batchPauseMaxSeconds,
+        );
+        await waitForCampaignRuntime(state, batchPauseSeconds * 1000);
+        continue;
+      }
+
+      const delaySeconds = randomCampaignInteger(
+        campaign.settings.minDelaySeconds,
+        campaign.settings.maxDelaySeconds,
+      );
+      await waitForCampaignRuntime(state, delaySeconds * 1000);
     }
   } catch (reason: unknown) {
     const message =

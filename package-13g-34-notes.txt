@@ -1,0 +1,13 @@
+AI Operasyon — Paket 13G-34
+Campaign Queue Gate Service
+
+Yeni kaynak:
+- src/main/services/campaign/campaign-queue-gate.service.ts
+
+Taşınanlar:
+- Çalışma saati penceresi kontrolü
+- Günlük limit kontrolü
+- Queue bekleme süresi kararı
+
+13G-33 uygulanmış kaynak üzerine kurulmalıdır.
+Geçici paket dosyalarını GitHub'a yüklemeyin.

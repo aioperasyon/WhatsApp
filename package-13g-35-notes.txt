@@ -1,0 +1,14 @@
+AI Operasyon — Paket 13G-35
+Campaign Post Send Delay Service
+
+Yeni kaynak:
+- src/main/services/campaign/campaign-post-send-delay.service.ts
+
+Taşınanlar:
+- Başarılı gönderim sonrası batch sayacı
+- Batch pause kararı
+- Normal gönderim gecikmesi
+- Bekleme süresini milisaniyeye çevirme
+
+13G-34 uygulanmış kaynak üzerine kurulmalıdır.
+Geçici paket dosyalarını GitHub'a yüklemeyin.

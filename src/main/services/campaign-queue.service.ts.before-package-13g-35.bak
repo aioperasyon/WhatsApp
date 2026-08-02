@@ -24,6 +24,9 @@ import {
   findNextPendingCampaignRecipient,
 } from '../repositories/campaign-recipient-lifecycle.repository.js';
 import {
+  randomCampaignInteger,
+} from './campaign/campaign-timing.service.js';
+import {
   waitForCampaignRuntime,
   wakeCampaignRuntime,
 } from './campaign/campaign-runtime-wait.service.js';
@@ -48,6 +51,9 @@ import {
   isTerminalCampaignStatus,
 } from './campaign/campaign-status-policy.service.js';
 import {
+  getCampaignBatchSize,
+} from './campaign/campaign-delivery-policy.service.js';
+import {
   getCampaignErrorMessage,
 } from './campaign/campaign-error-policy.service.js';
 import {
@@ -68,9 +74,6 @@ import {
 import {
   getCampaignQueueGate,
 } from './campaign/campaign-queue-gate.service.js';
-import {
-  getCampaignPostSendDelay,
-} from './campaign/campaign-post-send-delay.service.js';
 export { listCampaignRecipients } from '../repositories/campaign-recipient.repository.js';
 
 const runtimeStates =
@@ -210,20 +213,28 @@ async function runQueue(
         continue;
       }
 
-      const postSendDelay =
-        getCampaignPostSendDelay({
-          campaign,
-          sentSuccessfully,
-          sentSinceBatchPause,
-        });
+      if (sentSuccessfully) {
+        sentSinceBatchPause += 1;
+      }
 
-      sentSinceBatchPause =
-        postSendDelay.sentSinceBatchPause;
-
-      await waitForCampaignRuntime(
-        state,
-        postSendDelay.waitMs,
+      const batchSize = getCampaignBatchSize(
+        campaign.settings.batchSize,
       );
+      if (sentSinceBatchPause >= batchSize) {
+        sentSinceBatchPause = 0;
+        const batchPauseSeconds = randomCampaignInteger(
+          campaign.settings.batchPauseMinSeconds,
+          campaign.settings.batchPauseMaxSeconds,
+        );
+        await waitForCampaignRuntime(state, batchPauseSeconds * 1000);
+        continue;
+      }
+
+      const delaySeconds = randomCampaignInteger(
+        campaign.settings.minDelaySeconds,
+        campaign.settings.maxDelaySeconds,
+      );
+      await waitForCampaignRuntime(state, delaySeconds * 1000);
     }
   } catch (reason: unknown) {
     const message =
